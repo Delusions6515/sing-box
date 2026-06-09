@@ -18,6 +18,9 @@ type _V2RayTransportOptions struct {
 	QUICOptions        V2RayQUICOptions        `json:"-"`
 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+	// lx:begin xhttp
+	XHTTPOptions V2RayXHTTPOptions `json:"-"`
+	// lx:end xhttp
 }
 
 type V2RayTransportOptions _V2RayTransportOptions
@@ -35,6 +38,10 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
 		v = o.GRPCOptions
 	case C.V2RayTransportTypeHTTPUpgrade:
 		v = o.HTTPUpgradeOptions
+	// lx:begin xhttp
+	case C.V2RayTransportTypeXHTTP:
+		v = o.XHTTPOptions
+	// lx:end xhttp
 	case "":
 		return nil, E.New("missing transport type")
 	default:
@@ -60,6 +67,10 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
 		v = &o.GRPCOptions
 	case C.V2RayTransportTypeHTTPUpgrade:
 		v = &o.HTTPUpgradeOptions
+	// lx:begin xhttp
+	case C.V2RayTransportTypeXHTTP:
+		v = &o.XHTTPOptions
+	// lx:end xhttp
 	default:
 		return E.New("unknown transport type: " + o.Type)
 	}
