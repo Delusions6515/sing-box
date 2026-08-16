@@ -201,6 +201,11 @@ func isPassOutbound(manager adapter.OutboundManager, tag string) bool {
 func resolveOutbound(outbound adapter.Outbound, network string, metadata *adapter.InboundContext) ([]adapter.Outbound, error) {
 	chain := []adapter.Outbound{outbound}
 	for {
+		// Smart selects a leaf when it dials; resolving it here would bypass
+		// its per-connection ranking, fallback, and observations.
+		if _, isSmart := outbound.(adapter.SmartGroup); isSmart {
+			break
+		}
 		group, isGroup := outbound.(adapter.OutboundGroup)
 		if !isGroup {
 			break
@@ -661,6 +666,9 @@ func (r *Router) selectPreMatchOutbound(metadata *adapter.InboundContext, outbou
 			return nil, adapter.PreMatchContinue
 		}
 		return append([]adapter.Outbound{outbound}, selectedChain...), action
+	}
+	if _, isSmart := outbound.(adapter.SmartGroup); isSmart {
+		return nil, adapter.PreMatchContinue
 	}
 	if group, isGroup := outbound.(adapter.OutboundGroup); isGroup {
 		chain, action := r.selectPreMatchOutbound(metadata, group.Selected(metadata.Network), depth+1)
