@@ -1,6 +1,11 @@
 package option
 
-import "github.com/sagernet/sing/common/json/badoption"
+import (
+	"reflect"
+
+	"github.com/sagernet/sing-box/schema"
+	"github.com/sagernet/sing/common/json/badoption"
+)
 
 type SelectorOutboundOptions struct {
 	GroupCommonOption
@@ -40,3 +45,33 @@ type LoadBalanceOutboundOptions struct {
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
 	Strategy                  string             `json:"strategy,omitempty"`
 }
+
+type SmartOutboundOptions struct {
+	GroupCommonOption
+	URL               string             `json:"url,omitempty"`
+	Interval          badoption.Duration `json:"interval,omitempty"`
+	Timeout           badoption.Duration `json:"timeout,omitempty"`
+	Tolerance         uint16             `json:"tolerance,omitempty"`
+	MaxSelected       int                `json:"max_selected,omitempty"`
+	MinSamples        int                `json:"min_samples,omitempty"`
+	MaxFailedTimes    int                `json:"max_failed_times,omitempty"`
+	HistoryPath       string             `json:"history_path,omitempty"`
+	HistoryRetention  badoption.Duration `json:"history_retention,omitempty"`
+	MaxHistoryEntries int                `json:"max_history_entries,omitempty"`
+}
+
+func (SmartOutboundOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	node := schema.StrictObject()
+	if err := builder.FlattenStruct(node, reflect.TypeFor[SmartOutboundOptions]()); err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"max_selected", "min_samples", "max_failed_times", "max_history_entries"} {
+		node.Properties.Put(name, schema.UnsignedNode(64))
+	}
+	for _, name := range []string{"interval", "timeout", "history_retention"} {
+		node.Properties.Put(name, &schema.Node{Type: "string", Pattern: smartNonNegativeDurationPattern})
+	}
+	return node, nil
+}
+
+const smartNonNegativeDurationPattern = `^\+?(((\d+(\.\d*)?|\.\d+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h|d))+|0)$`
