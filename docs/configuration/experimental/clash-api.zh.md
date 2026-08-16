@@ -160,6 +160,8 @@ Clash 中的默认模式，默认使用 `Rule`。
 
 将 `Selector` 中出站的选定的目标出站存储在缓存文件中。
 
+Smart 出站组为只读。其代理响应包含 `smart` 对象，提供最近一次选中的叶子出站和候选排序快照。
+
 #### store_fakeip
 
 !!! failure "已在 sing-box 1.8.0 废弃"
