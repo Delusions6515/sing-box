@@ -192,6 +192,24 @@ type SelectorGroup interface {
 	Selected() Outbound
 }
 
+type SmartGroup interface {
+	OutboundGroup
+	SmartStatus() SmartGroupStatus
+}
+
+type SmartGroupStatus struct {
+	Selected   string                 `json:"selected"`
+	UpdatedAt  *time.Time             `json:"updated_at"`
+	Candidates []SmartCandidateStatus `json:"candidates"`
+}
+
+type SmartCandidateStatus struct {
+	Tag     string  `json:"tag"`
+	Weight  float64 `json:"weight"`
+	Samples int64   `json:"samples"`
+	Blocked bool    `json:"blocked"`
+}
+
 func OutboundTag(detour Outbound) string {
 	if group, isGroup := detour.(OutboundGroup); isGroup {
 		if now := group.Now(); now != "" {

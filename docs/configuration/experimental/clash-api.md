@@ -157,6 +157,8 @@ Store Clash mode in cache file.
 
 Store selected outbound for the `Selector` outbound in cache file.
 
+Smart outbound groups are read-only. Their proxy responses include a `smart` object with the most recent selected leaf outbound and candidate ranking snapshot.
+
 #### store_fakeip
 
 !!! failure "Deprecated in sing-box 1.8.0"
