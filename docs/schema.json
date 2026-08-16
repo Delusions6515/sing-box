@@ -13150,6 +13150,83 @@
           "additionalProperties": false
         },
         {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "smart"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "outbounds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "x-tag-reference": "outbound"
+              }
+            },
+            "providers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "x-tag-reference": "provider"
+              }
+            },
+            "exclude": {
+              "type": "string"
+            },
+            "include": {
+              "type": "string"
+            },
+            "use_all_providers": {
+              "type": "boolean"
+            },
+            "url": {
+              "type": "string"
+            },
+            "interval": {
+              "type": "string",
+              "pattern": "^\\+?(((\\d+(\\.\\d*)?|\\.\\d+)(ns|us|\\u00b5s|\\u03bcs|ms|s|m|h|d))+|0)$"
+            },
+            "timeout": {
+              "type": "string",
+              "pattern": "^\\+?(((\\d+(\\.\\d*)?|\\.\\d+)(ns|us|\\u00b5s|\\u03bcs|ms|s|m|h|d))+|0)$"
+            },
+            "tolerance": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "max_selected": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "min_samples": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_failed_times": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "history_path": {
+              "type": "string"
+            },
+            "history_retention": {
+              "type": "string",
+              "pattern": "^\\+?(((\\d+(\\.\\d*)?|\\.\\d+)(ns|us|\\u00b5s|\\u03bcs|ms|s|m|h|d))+|0)$"
+            },
+            "max_history_entries": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
           "oneOf": [
             {
               "type": "object",
