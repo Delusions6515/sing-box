@@ -318,3 +318,81 @@ func TestStoreConcurrentRecordRankAndSnapshot(t *testing.T) {
 		t.Fatalf("got %d samples, want 800", candidate.Samples)
 	}
 }
+
+func TestStoreGroupWeightsNormalizesAndSorts(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	store := NewStore(Config{})
+	good := Observation{Closed: true, Success: true, ConnectTime: 50 * time.Millisecond, FirstByte: 100 * time.Millisecond, UploadBytes: 1024 * 1024, DownloadBytes: 1024 * 1024, PeakUploadBPS: 300 * 1024, PeakDownloadBPS: 300 * 1024, Duration: 5 * time.Minute}
+	bad := Observation{Closed: true, Success: false, ConnectTime: 500 * time.Millisecond, FirstByte: 500 * time.Millisecond}
+	for range 8 {
+		store.Record(now, MetricKey{Group: "smart", Target: "web.example", Network: "tcp", Node: "fast"}, good)
+	}
+	for range 2 {
+		store.Record(now, MetricKey{Group: "smart", Target: "web.example", Network: "tcp", Node: "fast"}, bad)
+	}
+	for range 2 {
+		store.Record(now, MetricKey{Group: "smart", Target: "web.example", Network: "tcp", Node: "slow"}, good)
+	}
+	for range 8 {
+		store.Record(now, MetricKey{Group: "smart", Target: "web.example", Network: "tcp", Node: "slow"}, bad)
+	}
+	// Other groups must not leak into the ranking.
+	store.Record(now, MetricKey{Group: "other", Target: "web.example", Network: "tcp", Node: "intruder"}, good)
+
+	items := store.GroupWeights(now, "smart", []string{"slow", "missing", "fast"})
+	if len(items) != 3 {
+		t.Fatalf("got %d items, want 3", len(items))
+	}
+	if items[0].Name != "fast" || items[0].Weight != 100 {
+		t.Fatalf("best node was not normalized to 100: %+v", items[0])
+	}
+	if items[1].Name != "slow" || !(items[1].Weight > 0 && items[1].Weight < 100) {
+		t.Fatalf("weaker node was not scaled between 0 and 100: %+v", items[1])
+	}
+	if items[2].Name != "missing" || items[2].Weight != 0 {
+		t.Fatalf("unknown node was not reported at weight 0: %+v", items[2])
+	}
+	if items[0].Rank != "" {
+		t.Fatalf("rank must stay empty: %+v", items[0])
+	}
+	for _, item := range items {
+		if item.Name == "intruder" {
+			t.Fatalf("other group's node leaked into ranking: %+v", item)
+		}
+	}
+}
+
+func TestStoreGroupWeightsEmptyWithoutKnownData(t *testing.T) {
+	store := NewStore(Config{})
+	now := time.Unix(1_000_000, 0)
+	if items := store.GroupWeights(now, "smart", []string{"node"}); len(items) != 0 {
+		t.Fatalf("expected no weights for empty store, got %+v", items)
+	}
+	store.Record(now, MetricKey{Group: "smart", Target: "web.example", Network: "tcp", Node: "node"}, Observation{Closed: true, Success: true})
+	// A single sample is below MinSamples, so nothing is known yet.
+	if items := store.GroupWeights(now, "smart", []string{"node"}); len(items) != 0 {
+		t.Fatalf("expected no weights below MinSamples, got %+v", items)
+	}
+}
+
+func TestStoreClearDropsMetricsAndBreaker(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	key := MetricKey{Group: "smart", Target: "example.com", Network: "tcp", Node: "node"}
+	store := NewStore(Config{MaxFailedTimes: 2, BlockDuration: time.Minute})
+	store.Record(now, key, Observation{Success: false})
+	store.Record(now.Add(time.Second), key, Observation{Success: false})
+	if !store.Candidate(now, key).Blocked {
+		t.Fatal("candidate was not blocked before clear")
+	}
+	if !store.HasPendingChanges() {
+		t.Fatal("records did not mark pending changes")
+	}
+	store.Clear()
+	candidate := store.Candidate(now, key)
+	if candidate.Samples != 0 || candidate.Blocked || candidate.Known || candidate.Weight != 0 {
+		t.Fatalf("candidate survived clear: %+v", candidate)
+	}
+	if !store.HasPendingChanges() {
+		t.Fatal("clear did not mark pending changes")
+	}
+}

@@ -267,6 +267,19 @@ func (s *Smart) All() []string {
 	})
 }
 
+func (s *Smart) Weights() []smart.NodeRankItem {
+	return s.store.GroupWeights(time.Now(), s.Tag(), common.Map(s.candidateSnapshot(), func(candidate adapter.Outbound) string {
+		return candidate.Tag()
+	}))
+}
+
+// ClearCache drops all learned metrics and their persisted history so the
+// group relearns from scratch.
+func (s *Smart) ClearCache() error {
+	s.store.Clear()
+	return s.flushHistory(true)
+}
+
 func (s *Smart) SmartStatus() adapter.SmartGroupStatus {
 	s.statusAccess.RLock()
 	defer s.statusAccess.RUnlock()

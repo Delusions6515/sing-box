@@ -1,6 +1,7 @@
 package smart
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -44,6 +45,15 @@ type Candidate struct {
 	Samples int64
 	Blocked bool
 	Known   bool
+}
+
+// NodeRankItem is a single node's learned weight, matching mihomo's
+// /group/{name}/weights response shape. Weight is normalized so the best
+// node in the group scores 100.
+type NodeRankItem struct {
+	Name   string
+	Rank   string
+	Weight float64
 }
 
 type Snapshot struct {
@@ -209,6 +219,104 @@ func (s *Store) Rank(now time.Time, keys []MetricKey) []Candidate {
 		return left.Weight > right.Weight
 	})
 	return candidates
+}
+
+// GroupWeights aggregates a group's learned weights across targets and
+// transports, normalized so the best node scores 100. Every node in the
+// provided list is included; nodes without enough data score 0. Returns an
+// empty slice when no node has a known weight.
+func (s *Store) GroupWeights(now time.Time, group string, nodes []string) []NodeRankItem {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	type aggregate struct {
+		success, failure           int64
+		connectMS, latencyMS       float64
+		connectSamples, latSamples int64
+		latest                     latestObservation
+		lastUsed                   time.Time
+		samples                    int64
+		udpSamples                 int64
+	}
+	byNode := make(map[string]*aggregate)
+	for key, entry := range s.metrics {
+		if key.Group != group {
+			continue
+		}
+		agg := byNode[key.Node]
+		if agg == nil {
+			agg = new(aggregate)
+			byNode[key.Node] = agg
+		}
+		agg.success += entry.Success
+		agg.failure += entry.Failure
+		agg.connectMS = mergeAverage(agg.connectMS, agg.connectSamples, entry.ConnectMS, entry.ConnectSamples)
+		agg.connectSamples += entry.ConnectSamples
+		agg.latencyMS = mergeAverage(agg.latencyMS, agg.latSamples, entry.LatencyMS, entry.LatencySamples)
+		agg.latSamples += entry.LatencySamples
+		agg.samples += entry.Success + entry.Failure
+		if key.Network == "udp" {
+			agg.udpSamples += entry.Success + entry.Failure
+		}
+		if entry.LastUsed.After(agg.lastUsed) {
+			agg.lastUsed = entry.LastUsed
+			agg.latest = entry.Latest
+		}
+	}
+	items := make([]NodeRankItem, 0, len(nodes))
+	var maxWeight float64
+	seen := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		if seen[node] {
+			continue
+		}
+		seen[node] = true
+		item := NodeRankItem{Name: node}
+		if agg := byNode[node]; agg != nil {
+			input := ModelInput{
+				Success:            agg.success,
+				Failure:            agg.failure,
+				ConnectTime:        time.Duration(agg.connectMS * float64(time.Millisecond)),
+				Latency:            time.Duration(agg.latencyMS * float64(time.Millisecond)),
+				UploadMB:           agg.latest.UploadMB,
+				DownloadMB:         agg.latest.DownloadMB,
+				MaxUploadRateKB:    agg.latest.MaxUploadRateKB,
+				MaxDownloadRateKB:  agg.latest.MaxDownloadRateKB,
+				ConnectionDuration: agg.latest.Duration,
+				LastUsed:           agg.lastUsed,
+				IsUDP:              agg.udpSamples > agg.samples/2,
+				ConnectionFailed:   !agg.latest.Success,
+			}
+			if weight, insufficient := calculateWeight(input, now, s.config.MinSamples); !insufficient {
+				item.Weight = weight
+			}
+		}
+		if item.Weight > maxWeight {
+			maxWeight = item.Weight
+		}
+		items = append(items, item)
+	}
+	if maxWeight <= 0 {
+		return nil
+	}
+	for index := range items {
+		items[index].Weight = math.Round(items[index].Weight/maxWeight*100*100) / 100
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Weight != items[j].Weight {
+			return items[i].Weight > items[j].Weight
+		}
+		return items[i].Name < items[j].Name
+	})
+	return items
+}
+
+// Clear drops all learned metrics and resets circuit-breaker state so the
+// group relearns from scratch.
+func (s *Store) Clear() {
+	s.access.Lock()
+	defer s.access.Unlock()
+	s.metrics = make(map[MetricKey]*metric)
+	s.revision++
 }
 
 // GC removes expired entries and then oldest entries over maxEntries.
