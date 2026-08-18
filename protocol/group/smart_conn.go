@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -21,11 +22,11 @@ type smartConn struct {
 	download  atomic.Int64
 	failed    atomic.Bool
 	firstByte atomic.Int64
-	onClose   func(bool, int64, int64, time.Duration, time.Duration)
+	onClose   func(bool, int64, int64, time.Duration, time.Duration, float64, bool)
 	once      sync.Once
 }
 
-func newSmartConn(conn net.Conn, onClose func(bool, int64, int64, time.Duration, time.Duration)) *smartConn {
+func newSmartConn(conn net.Conn, onClose func(bool, int64, int64, time.Duration, time.Duration, float64, bool)) *smartConn {
 	result := &smartConn{start: time.Now(), onClose: onClose}
 	result.counter = bufio.NewInt64CounterConn(conn, []*atomic.Int64{&result.download}, []*atomic.Int64{&result.upload})
 	return result
@@ -98,9 +99,10 @@ func (c *smartConn) recordFirstByte() {
 }
 
 func (c *smartConn) Close() error {
+	lossRate, lossAvailable := smart.TCPLossRate(c.counter)
 	err := c.counter.Close()
 	c.once.Do(func() {
-		c.onClose(!c.failed.Load(), c.upload.Load(), c.download.Load(), time.Duration(c.firstByte.Load()), time.Since(c.start))
+		c.onClose(!c.failed.Load(), c.upload.Load(), c.download.Load(), time.Duration(c.firstByte.Load()), time.Since(c.start), lossRate, lossAvailable)
 	})
 	return err
 }
