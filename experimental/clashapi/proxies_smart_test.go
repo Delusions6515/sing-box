@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	N "github.com/sagernet/sing/common/network"
@@ -19,7 +20,10 @@ func TestProxyInfoRendersReadOnlySmartStatus(t *testing.T) {
 		UpdatedAt:  &updated,
 		Candidates: []adapter.SmartCandidateStatus{{Tag: "fast", Weight: 0.9, Samples: 3}},
 	}}
-	info := proxyInfo(&Server{urlTestHistory: urltest.NewHistoryStorage()}, detour)
+	info := proxyInfo(&Server{
+		outbound:       &smartOutboundManager{outbounds: []adapter.Outbound{&plainOutbound{tag: "fast"}}},
+		urlTestHistory: urltest.NewHistoryStorage(),
+	}, detour)
 	content, err := info.MarshalJSON()
 	require.NoError(t, err)
 	var decoded map[string]any
@@ -66,4 +70,17 @@ func (g *smartStatusTestGroup) SmartStatus() adapter.SmartGroupStatus {
 	status := g.status
 	status.Candidates = append([]adapter.SmartCandidateStatus{}, status.Candidates...)
 	return status
+}
+
+func (g *smartStatusTestGroup) Weights() []smart.NodeRankItem {
+	items := make([]smart.NodeRankItem, 0, len(g.status.Candidates))
+	for _, candidate := range g.status.Candidates {
+		items = append(items, smart.NodeRankItem{Name: candidate.Tag, Weight: candidate.Weight})
+	}
+	return items
+}
+
+func (g *smartStatusTestGroup) ClearCache() error {
+	g.status = adapter.SmartGroupStatus{}
+	return nil
 }

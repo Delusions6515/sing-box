@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -19,10 +20,12 @@ import (
 func groupRouter(server *Server) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getGroups(server))
+	r.Get("/weights", getAllGroupWeights(server))
 	r.Route("/{name}", func(r chi.Router) {
 		r.Use(parseProxyName, findProxyByName(server))
 		r.Get("/", getGroup(server))
 		r.Get("/delay", getGroupDelay(server))
+		r.Get("/weights", getGroupWeights(server))
 	})
 	return r
 }
@@ -98,5 +101,55 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		}
 
 		render.JSON(w, r, result)
+	}
+}
+
+func getGroupWeights(server *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		smartGroup, ok := proxy.(adapter.SmartGroup)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, render.M{
+				"weights": []smart.NodeRankItem{},
+				"error":   "Not a Smart group",
+			})
+			return
+		}
+		weights := smartGroup.Weights()
+		if len(weights) == 0 {
+			render.JSON(w, r, render.M{
+				"weights": []smart.NodeRankItem{},
+				"message": "No weight data available for the specified group",
+			})
+			return
+		}
+		render.JSON(w, r, render.M{"weights": weights})
+	}
+}
+
+func getAllGroupWeights(server *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		result := make(map[string][]smart.NodeRankItem)
+		for _, detour := range server.outbound.Outbounds() {
+			smartGroup, ok := detour.(adapter.SmartGroup)
+			if !ok {
+				continue
+			}
+			if weights := smartGroup.Weights(); len(weights) > 0 {
+				result[smartGroup.Tag()] = weights
+			}
+		}
+		if len(result) == 0 {
+			render.JSON(w, r, render.M{
+				"weights": map[string][]smart.NodeRankItem{},
+				"message": "No Smart groups or no weight data available",
+			})
+			return
+		}
+		render.JSON(w, r, render.M{
+			"weights": result,
+			"errors":  map[string]string{},
+		})
 	}
 }
