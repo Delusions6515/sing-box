@@ -232,6 +232,51 @@ func TestSmartPacketCopyPreservesOutboundHeadroom(t *testing.T) {
 	require.True(t, succeeded)
 }
 
+func TestSmartWeightsAggregatesStore(t *testing.T) {
+	group := newSmartTestGroup()
+	group.candidates = []adapter.Outbound{
+		&smartTestOutbound{tag: "fast"},
+		&smartTestOutbound{tag: "slow"},
+		&smartTestOutbound{tag: "missing"},
+	}
+	now := time.Now()
+	good := smart.Observation{Closed: true, Success: true, ConnectTime: 50 * time.Millisecond, FirstByte: 100 * time.Millisecond, UploadBytes: 1024 * 1024, DownloadBytes: 1024 * 1024, PeakUploadBPS: 300 * 1024, PeakDownloadBPS: 300 * 1024, Duration: 5 * time.Minute}
+	for range 8 {
+		group.store.Record(now, smart.MetricKey{Group: "smart", Target: "web.example", Network: N.NetworkTCP, Node: "fast"}, good)
+	}
+	items := group.Weights()
+	require.Len(t, items, 3)
+	require.Equal(t, "fast", items[0].Name)
+	require.Equal(t, 100.0, items[0].Weight)
+	// The two unknown nodes tie at 0 and sort by name.
+	require.Equal(t, "missing", items[1].Name)
+	require.Equal(t, "slow", items[2].Name)
+	require.Zero(t, items[1].Weight)
+	require.Zero(t, items[2].Weight)
+}
+
+func TestSmartClearCacheDropsMetricsAndHistory(t *testing.T) {
+	path := t.TempDir() + "/smart-history.json"
+	group := newSmartTestGroup()
+	group.historyPath = path
+	group.historyRetention = time.Hour
+	group.maxHistoryEntries = 100
+	key := smart.MetricKey{Group: "smart", Target: "example.com", Network: N.NetworkTCP, Node: "node"}
+	group.store.Record(time.Now(), key, smart.Observation{Closed: true, Success: true})
+	require.NoError(t, group.loadHistory())
+	require.Equal(t, int64(1), group.store.Candidate(time.Now(), key).Samples)
+	require.NoError(t, group.ClearCache())
+	require.Zero(t, group.store.Candidate(time.Now(), key).Samples)
+	restored := newSmartTestGroup()
+	restored.historyPath = path
+	restored.historyRetention = time.Hour
+	restored.maxHistoryEntries = 100
+	require.NoError(t, restored.loadHistory())
+	require.Zero(t, restored.store.Candidate(time.Now(), key).Samples)
+	require.NoError(t, restored.Close())
+	require.NoError(t, group.Close())
+}
+
 func TestSmartDialFallsBackAfterExhaustedRace(t *testing.T) {
 	first := &smartTestOutbound{tag: "first", dial: func(context.Context, string, M.Socksaddr) (net.Conn, error) {
 		return nil, errors.New("first failed")

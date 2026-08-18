@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/common/hash"
+	"github.com/sagernet/sing-box/common/smart"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/common/varbin"
@@ -195,6 +196,8 @@ type SelectorGroup interface {
 type SmartGroup interface {
 	OutboundGroup
 	SmartStatus() SmartGroupStatus
+	Weights() []smart.NodeRankItem
+	ClearCache() error
 }
 
 type SmartGroupStatus struct {
