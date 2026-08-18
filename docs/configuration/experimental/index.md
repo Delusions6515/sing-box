@@ -13,7 +13,8 @@
     "cache_file": {},
     "clash_api": {},
     "observability": {},
-    "v2ray_api": {}
+    "v2ray_api": {},
+    "smart": {}
   }
 }
 ```
@@ -26,3 +27,4 @@
 | `clash_api`  | [Clash API](./clash-api/)   |
 | `observability` | [Observability](observability.md) |
 | `v2ray_api`  | [V2Ray API](./v2ray-api/)   |
+| `smart`      | [Smart](./smart/)            |

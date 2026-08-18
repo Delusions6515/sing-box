@@ -19,6 +19,8 @@ import (
 	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -33,6 +35,33 @@ func TestSmartTargetPrefersInboundNames(t *testing.T) {
 	require.Equal(t, "video.example", smartTarget(&adapter.InboundContext{SniffHost: "Video.Example."}, destination))
 	require.Equal(t, "cache.example", smartTarget(&adapter.InboundContext{Domain: "Cache.Example."}, destination))
 	require.Equal(t, "203.0.113.1", smartTarget(nil, destination))
+}
+
+func TestSmartRejectsInvalidTuningOptions(t *testing.T) {
+	for name, options := range map[string]option.SmartOutboundOptions{
+		"policy":            {PolicyPriority: "node:"},
+		"sample below zero": {SampleRate: -0.1},
+		"sample above one":  {SampleRate: 1.1},
+		"status range":      {ExpectedStatus: "204-200"},
+		"status code":       {ExpectedStatus: "600"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewSmart(context.Background(), nil, log.NewNOPFactory().NewLogger("test"), "smart", options)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSmartURLTestRejectsUnexpectedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(server.Close)
+	group := newSmartTestGroup()
+	group.url = server.URL
+	group.expectedStatus = smart.StatusRanges{{From: http.StatusNoContent, To: http.StatusNoContent}}
+	_, err := group.urlTest(context.Background(), N.SystemDialer)
+	require.Error(t, err)
 }
 
 func TestSmartFallbackToleranceKeepsConfigurationOrder(t *testing.T) {
@@ -158,7 +187,7 @@ func TestSmartConnCountsBufferedIOAndClosesOnce(t *testing.T) {
 		download int64
 		calls    int
 	)
-	conn := newSmartConn(left, func(_ bool, gotUpload, gotDownload int64, _, _ time.Duration) {
+	conn := newSmartConn(left, func(_ bool, gotUpload, gotDownload int64, _, _ time.Duration, _ float64, _ bool) {
 		access.Lock()
 		defer access.Unlock()
 		upload, download = gotUpload, gotDownload
@@ -188,7 +217,7 @@ func TestSmartConnCountsBufferedIOAndClosesOnce(t *testing.T) {
 func TestSmartConnectionsDoNotUnwrapPastTracking(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
-	conn := newSmartConn(left, func(bool, int64, int64, time.Duration, time.Duration) {})
+	conn := newSmartConn(left, func(bool, int64, int64, time.Duration, time.Duration, float64, bool) {})
 	reader, counters := N.UnwrapCountReader(conn, nil)
 	require.Same(t, conn, reader)
 	require.Empty(t, counters)
@@ -230,6 +259,51 @@ func TestSmartPacketCopyPreservesOutboundHeadroom(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 	require.NoError(t, conn.Close())
 	require.True(t, succeeded)
+}
+
+func TestSmartWeightsAggregatesStore(t *testing.T) {
+	group := newSmartTestGroup()
+	group.candidates = []adapter.Outbound{
+		&smartTestOutbound{tag: "fast"},
+		&smartTestOutbound{tag: "slow"},
+		&smartTestOutbound{tag: "missing"},
+	}
+	now := time.Now()
+	good := smart.Observation{Closed: true, Success: true, ConnectTime: 50 * time.Millisecond, FirstByte: 100 * time.Millisecond, UploadBytes: 1024 * 1024, DownloadBytes: 1024 * 1024, PeakUploadBPS: 300 * 1024, PeakDownloadBPS: 300 * 1024, Duration: 5 * time.Minute}
+	for range 8 {
+		group.store.Record(now, smart.MetricKey{Group: "smart", Target: "web.example", Network: N.NetworkTCP, Node: "fast"}, good)
+	}
+	items := group.Weights()
+	require.Len(t, items, 3)
+	require.Equal(t, "fast", items[0].Name)
+	require.Equal(t, 100.0, items[0].Weight)
+	// The two unknown nodes tie at 0 and sort by name.
+	require.Equal(t, "missing", items[1].Name)
+	require.Equal(t, "slow", items[2].Name)
+	require.Zero(t, items[1].Weight)
+	require.Zero(t, items[2].Weight)
+}
+
+func TestSmartClearCacheDropsMetricsAndHistory(t *testing.T) {
+	path := t.TempDir() + "/smart-history.json"
+	group := newSmartTestGroup()
+	group.historyPath = path
+	group.historyRetention = time.Hour
+	group.maxHistoryEntries = 100
+	key := smart.MetricKey{Group: "smart", Target: "example.com", Network: N.NetworkTCP, Node: "node"}
+	group.store.Record(time.Now(), key, smart.Observation{Closed: true, Success: true})
+	require.NoError(t, group.loadHistory())
+	require.Equal(t, int64(1), group.store.Candidate(time.Now(), key).Samples)
+	require.NoError(t, group.ClearCache())
+	require.Zero(t, group.store.Candidate(time.Now(), key).Samples)
+	restored := newSmartTestGroup()
+	restored.historyPath = path
+	restored.historyRetention = time.Hour
+	restored.maxHistoryEntries = 100
+	require.NoError(t, restored.loadHistory())
+	require.Zero(t, restored.store.Candidate(time.Now(), key).Samples)
+	require.NoError(t, restored.Close())
+	require.NoError(t, group.Close())
 }
 
 func TestSmartDialFallsBackAfterExhaustedRace(t *testing.T) {

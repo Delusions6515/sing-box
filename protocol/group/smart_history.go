@@ -12,7 +12,7 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 )
 
-const smartHistoryVersion = 1
+const smartHistoryVersion = 2
 
 type smartHistoryFile struct {
 	Version int                       `json:"version"`
@@ -43,7 +43,7 @@ func (s *Smart) loadHistory() error {
 		switch {
 		case err == nil:
 			var history smartHistoryFile
-			if err = json.Unmarshal(content, &history); err != nil || history.Version != smartHistoryVersion {
+			if err = json.Unmarshal(content, &history); err != nil || history.Version < 1 || history.Version > smartHistoryVersion {
 				if err == nil {
 					err = errors.New("unsupported smart history version")
 				}

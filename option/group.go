@@ -57,6 +57,13 @@ type SmartOutboundOptions struct {
 	HistoryPath       string             `json:"history_path,omitempty"`
 	HistoryRetention  badoption.Duration `json:"history_retention,omitempty"`
 	MaxHistoryEntries int                `json:"max_history_entries,omitempty"`
+	PolicyPriority    string             `json:"policy_priority,omitempty"`
+	UseLightGBM       bool               `json:"use_lightgbm,omitempty"`
+	CollectData       bool               `json:"collect_data,omitempty"`
+	SampleRate        float64            `json:"sample_rate,omitempty"`
+	PreferASN         bool               `json:"prefer_asn,omitempty"`
+	DisableUDP        bool               `json:"disable_udp,omitempty"`
+	ExpectedStatus    string             `json:"expected_status,omitempty"`
 }
 
 func (SmartOutboundOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
@@ -67,6 +74,8 @@ func (SmartOutboundOptions) DescribeSchema(builder schema.Builder) (*schema.Node
 	for _, name := range []string{"max_selected", "min_samples", "max_failed_times", "max_history_entries"} {
 		node.Properties.Put(name, schema.UnsignedNode(64))
 	}
+	minimum, maximum := int64(0), uint64(1)
+	node.Properties.Put("sample_rate", &schema.Node{Type: "number", Minimum: &minimum, Maximum: &maximum})
 	for _, name := range []string{"interval", "timeout", "history_retention"} {
 		node.Properties.Put(name, &schema.Node{Type: "string", Pattern: smartNonNegativeDurationPattern})
 	}
