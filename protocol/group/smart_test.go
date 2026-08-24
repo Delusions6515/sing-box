@@ -19,6 +19,8 @@ import (
 	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -33,6 +35,33 @@ func TestSmartTargetPrefersInboundNames(t *testing.T) {
 	require.Equal(t, "video.example", smartTarget(&adapter.InboundContext{SniffHost: "Video.Example."}, destination))
 	require.Equal(t, "cache.example", smartTarget(&adapter.InboundContext{Domain: "Cache.Example."}, destination))
 	require.Equal(t, "203.0.113.1", smartTarget(nil, destination))
+}
+
+func TestSmartRejectsInvalidTuningOptions(t *testing.T) {
+	for name, options := range map[string]option.SmartOutboundOptions{
+		"policy":            {PolicyPriority: "node:"},
+		"sample below zero": {SampleRate: -0.1},
+		"sample above one":  {SampleRate: 1.1},
+		"status range":      {ExpectedStatus: "204-200"},
+		"status code":       {ExpectedStatus: "600"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewSmart(context.Background(), nil, log.NewNOPFactory().NewLogger("test"), "smart", options)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSmartURLTestRejectsUnexpectedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(server.Close)
+	group := newSmartTestGroup()
+	group.url = server.URL
+	group.expectedStatus = smart.StatusRanges{{From: http.StatusNoContent, To: http.StatusNoContent}}
+	_, err := group.urlTest(context.Background(), N.SystemDialer)
+	require.Error(t, err)
 }
 
 func TestSmartFallbackToleranceKeepsConfigurationOrder(t *testing.T) {
@@ -158,7 +187,7 @@ func TestSmartConnCountsBufferedIOAndClosesOnce(t *testing.T) {
 		download int64
 		calls    int
 	)
-	conn := newSmartConn(left, func(_ bool, gotUpload, gotDownload int64, _, _ time.Duration) {
+	conn := newSmartConn(left, func(_ bool, gotUpload, gotDownload int64, _, _ time.Duration, _ float64, _ bool) {
 		access.Lock()
 		defer access.Unlock()
 		upload, download = gotUpload, gotDownload
@@ -188,7 +217,7 @@ func TestSmartConnCountsBufferedIOAndClosesOnce(t *testing.T) {
 func TestSmartConnectionsDoNotUnwrapPastTracking(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
-	conn := newSmartConn(left, func(bool, int64, int64, time.Duration, time.Duration) {})
+	conn := newSmartConn(left, func(bool, int64, int64, time.Duration, time.Duration, float64, bool) {})
 	reader, counters := N.UnwrapCountReader(conn, nil)
 	require.Same(t, conn, reader)
 	require.Empty(t, counters)

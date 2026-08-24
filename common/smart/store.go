@@ -1,19 +1,27 @@
 package smart
 
 import (
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-const SnapshotVersion = 1
+const SnapshotVersion = 2
+
+const (
+	rankCacheTTL  = 10 * time.Second
+	maxRankCaches = 256
+)
 
 // MetricKey separates every Smart observation by group, target, transport,
 // and leaf outbound. An empty target is intentionally not tracked.
 type MetricKey struct {
 	Group   string `json:"group"`
 	Target  string `json:"target"`
+	ASN     string `json:"asn,omitempty"`
 	Network string `json:"network"`
 	Node    string `json:"node"`
 }
@@ -23,6 +31,8 @@ type Config struct {
 	MaxFailedTimes int
 	BlockDuration  time.Duration
 	MaxEntries     int
+	Predict        func(ModelInput) (float64, bool)
+	WeightFactor   func(string) float64
 }
 
 // Observation is supplied either for a failed dial or a closed connection.
@@ -37,6 +47,8 @@ type Observation struct {
 	PeakUploadBPS   float64
 	PeakDownloadBPS float64
 	Duration        time.Duration
+	LossRate        float64
+	LossAvailable   bool
 }
 
 type Candidate struct {
@@ -63,15 +75,23 @@ type Snapshot struct {
 
 // MetricSnapshot deliberately excludes the in-memory breaker state.
 type MetricSnapshot struct {
-	Key            MetricKey         `json:"key"`
-	Success        int64             `json:"success"`
-	Failure        int64             `json:"failure"`
-	ConnectMS      float64           `json:"connect_ms,omitempty"`
-	LatencyMS      float64           `json:"latency_ms,omitempty"`
-	ConnectSamples int64             `json:"connect_samples,omitempty"`
-	LatencySamples int64             `json:"latency_samples,omitempty"`
-	Latest         latestObservation `json:"latest,omitempty"`
-	LastUsed       time.Time         `json:"last_used"`
+	Key               MetricKey         `json:"key"`
+	Success           int64             `json:"success"`
+	Failure           int64             `json:"failure"`
+	ConnectMS         float64           `json:"connect_ms,omitempty"`
+	LatencyMS         float64           `json:"latency_ms,omitempty"`
+	ConnectSamples    int64             `json:"connect_samples,omitempty"`
+	LatencySamples    int64             `json:"latency_samples,omitempty"`
+	Latest            latestObservation `json:"latest,omitempty"`
+	UploadTotalMB     float64           `json:"upload_total_mb,omitempty"`
+	DownloadTotalMB   float64           `json:"download_total_mb,omitempty"`
+	MaxUploadRateKB   float64           `json:"max_upload_rate_kb,omitempty"`
+	MaxDownloadRateKB float64           `json:"max_download_rate_kb,omitempty"`
+	DurationMS        float64           `json:"duration_ms,omitempty"`
+	DurationSamples   int64             `json:"duration_samples,omitempty"`
+	LossRate          float64           `json:"loss_rate,omitempty"`
+	LossSamples       int64             `json:"loss_samples,omitempty"`
+	LastUsed          time.Time         `json:"last_used"`
 }
 
 type latestObservation struct {
@@ -81,6 +101,7 @@ type latestObservation struct {
 	MaxUploadRateKB   float64       `json:"max_upload_rate_kb,omitempty"`
 	MaxDownloadRateKB float64       `json:"max_download_rate_kb,omitempty"`
 	Duration          time.Duration `json:"duration,omitempty"`
+	LossRate          float64       `json:"loss_rate,omitempty"`
 }
 
 type metric struct {
@@ -94,31 +115,56 @@ type metric struct {
 	LastUsed            time.Time
 	ConsecutiveFailures int
 	BlockedUntil        time.Time
+	UploadTotalMB       float64
+	DownloadTotalMB     float64
+	MaxUploadRateKB     float64
+	MaxDownloadRateKB   float64
+	DurationMS          float64
+	DurationSamples     int64
+	LossRate            float64
+	LossSamples         int64
 }
 
-func (m *metric) modelInput(network string) ModelInput {
+func (m *metric) modelInput(key MetricKey) ModelInput {
 	return ModelInput{
-		Success:            m.Success,
-		Failure:            m.Failure,
-		ConnectTime:        time.Duration(m.ConnectMS * float64(time.Millisecond)),
-		Latency:            time.Duration(m.LatencyMS * float64(time.Millisecond)),
-		UploadMB:           m.Latest.UploadMB,
-		DownloadMB:         m.Latest.DownloadMB,
-		MaxUploadRateKB:    m.Latest.MaxUploadRateKB,
-		MaxDownloadRateKB:  m.Latest.MaxDownloadRateKB,
-		ConnectionDuration: m.Latest.Duration,
-		LastUsed:           m.LastUsed,
-		IsUDP:              network == "udp",
-		ConnectionFailed:   !m.Latest.Success,
+		Success:                   m.Success,
+		Failure:                   m.Failure,
+		ConnectTime:               time.Duration(m.ConnectMS * float64(time.Millisecond)),
+		Latency:                   time.Duration(m.LatencyMS * float64(time.Millisecond)),
+		UploadMB:                  m.Latest.UploadMB,
+		DownloadMB:                m.Latest.DownloadMB,
+		MaxUploadRateKB:           m.Latest.MaxUploadRateKB,
+		MaxDownloadRateKB:         m.Latest.MaxDownloadRateKB,
+		ConnectionDuration:        m.Latest.Duration,
+		HistoryUploadMB:           m.UploadTotalMB,
+		HistoryDownloadMB:         m.DownloadTotalMB,
+		HistoryMaxUploadRateKB:    m.MaxUploadRateKB,
+		HistoryMaxDownloadRateKB:  m.MaxDownloadRateKB,
+		HistoryConnectionDuration: time.Duration(m.DurationMS * float64(time.Millisecond)),
+		LossRate:                  m.Latest.LossRate,
+		CumulativeLossRate:        m.LossRate,
+		LastUsed:                  m.LastUsed,
+		ASN:                       key.ASN,
+		Target:                    key.Target,
+		IsUDP:                     key.Network == "udp",
+		ConnectionFailed:          !m.Latest.Success,
 	}
 }
 
 type Store struct {
 	access          sync.RWMutex
 	metrics         map[MetricKey]*metric
+	rankCache       map[string]rankCacheEntry
 	config          Config
 	revision        uint64
 	flushedRevision uint64
+}
+
+type rankCacheEntry struct {
+	revision   uint64
+	createdAt  time.Time
+	keys       []MetricKey
+	candidates []Candidate
 }
 
 func NewStore(config Config) *Store {
@@ -131,7 +177,7 @@ func NewStore(config Config) *Store {
 	if config.BlockDuration <= 0 {
 		config.BlockDuration = 10 * time.Minute
 	}
-	return &Store{metrics: make(map[MetricKey]*metric), config: config}
+	return &Store{metrics: make(map[MetricKey]*metric), rankCache: make(map[string]rankCacheEntry), config: config}
 }
 
 func (s *Store) Record(now time.Time, key MetricKey, observation Observation) {
@@ -174,7 +220,20 @@ func (s *Store) Record(now time.Time, key MetricKey, observation Observation) {
 			MaxUploadRateKB:   observation.PeakUploadBPS / 1024,
 			MaxDownloadRateKB: observation.PeakDownloadBPS / 1024,
 			Duration:          observation.Duration,
+			LossRate:          observation.LossRate,
 		}
+		entry.UploadTotalMB += entry.Latest.UploadMB
+		entry.DownloadTotalMB += entry.Latest.DownloadMB
+		entry.MaxUploadRateKB = max(entry.MaxUploadRateKB, entry.Latest.MaxUploadRateKB)
+		entry.MaxDownloadRateKB = max(entry.MaxDownloadRateKB, entry.Latest.MaxDownloadRateKB)
+		if observation.Duration > 0 {
+			entry.DurationMS = updateEWMA(entry.DurationMS, float64(observation.Duration)/float64(time.Millisecond), entry.DurationSamples)
+			entry.DurationSamples++
+		}
+	}
+	if observation.LossAvailable {
+		entry.LossRate = updateEWMA(entry.LossRate, observation.LossRate, entry.LossSamples)
+		entry.LossSamples++
 	}
 	s.revision++
 }
@@ -187,27 +246,101 @@ func (s *Store) Candidate(now time.Time, key MetricKey) Candidate {
 
 func (s *Store) candidateLocked(now time.Time, key MetricKey) Candidate {
 	candidate := Candidate{Key: key}
-	entry := s.metrics[key]
+	entry := s.metricLocked(key)
 	if entry == nil {
 		return candidate
 	}
 	candidate.Samples = entry.Success + entry.Failure
 	candidate.Blocked = entry.BlockedUntil.After(now)
-	weight, insufficient := calculateWeight(entry.modelInput(key.Network), now, s.config.MinSamples)
+	input := entry.modelInput(key)
+	weight, insufficient := calculateWeight(input, now, s.config.MinSamples)
+	if !insufficient && s.config.Predict != nil {
+		if predicted, predictedOK := s.config.Predict(input); predictedOK {
+			weight = predicted
+		}
+	}
+	if !insufficient && s.config.WeightFactor != nil {
+		weight *= s.config.WeightFactor(key.Node)
+	}
 	candidate.Weight = weight
 	candidate.Known = !insufficient
 	return candidate
 }
 
+func (s *Store) metricLocked(key MetricKey) *metric {
+	entry := s.metrics[key]
+	if entry == nil && key.ASN != "" {
+		key.ASN = ""
+		entry = s.metrics[key]
+	}
+	return entry
+}
+
+// ModelInput returns the current full metric input for collection. ASN-scoped
+// lookups fall back to the generic target history until enough ASN samples exist.
+func (s *Store) ModelInput(key MetricKey) (ModelInput, bool) {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	entry := s.metricLocked(key)
+	if entry == nil {
+		return ModelInput{}, false
+	}
+	return entry.modelInput(key), true
+}
+
+// Recover clears elapsed quarantine state. It is safe to call from periodic
+// maintenance and lets groups resume candidates without discarding history.
+func (s *Store) Recover(now time.Time) {
+	s.access.Lock()
+	defer s.access.Unlock()
+	changed := false
+	for _, entry := range s.metrics {
+		if !entry.BlockedUntil.IsZero() && !entry.BlockedUntil.After(now) {
+			entry.BlockedUntil = time.Time{}
+			entry.ConsecutiveFailures = 0
+			changed = true
+		}
+	}
+	if changed {
+		s.revision++
+	}
+}
+
+// Prefetch builds cached ranks for all known group/target/network tuples.
+// It avoids repeated sort work on hot destinations while Record invalidates
+// the cache through the store revision.
+func (s *Store) Prefetch(now time.Time, group string) {
+	s.access.RLock()
+	sets := make(map[string][]MetricKey)
+	for key := range s.metrics {
+		if key.Group != group {
+			continue
+		}
+		setKey := fmt.Sprintf("%s\x00%s\x00%s", key.Group, key.Target, key.Network)
+		sets[setKey] = append(sets[setKey], key)
+	}
+	s.access.RUnlock()
+	for _, keys := range sets {
+		s.Rank(now, keys)
+	}
+}
+
 // Rank returns candidates in descending learned weight. It is stable for ties
 // so callers retain their configuration order for equal candidates.
 func (s *Store) Rank(now time.Time, keys []MetricKey) []Candidate {
+	cacheKey := rankCacheKey(keys)
 	s.access.RLock()
-	defer s.access.RUnlock()
+	if cached, loaded := s.rankCache[cacheKey]; loaded && cached.revision == s.revision && now.Sub(cached.createdAt) < rankCacheTTL && metricKeysEqual(cached.keys, keys) {
+		candidates := append([]Candidate(nil), cached.candidates...)
+		s.access.RUnlock()
+		return candidates
+	}
 	candidates := make([]Candidate, len(keys))
 	for index, key := range keys {
 		candidates[index] = s.candidateLocked(now, key)
 	}
+	revision := s.revision
+	s.access.RUnlock()
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
 		if left.Blocked != right.Blocked {
@@ -218,7 +351,52 @@ func (s *Store) Rank(now time.Time, keys []MetricKey) []Candidate {
 		}
 		return left.Weight > right.Weight
 	})
+	s.access.Lock()
+	if s.revision == revision {
+		if len(s.rankCache) >= maxRankCaches {
+			var oldestKey string
+			var oldest time.Time
+			for key, cached := range s.rankCache {
+				if oldest.IsZero() || cached.createdAt.Before(oldest) {
+					oldestKey, oldest = key, cached.createdAt
+				}
+			}
+			delete(s.rankCache, oldestKey)
+		}
+		s.rankCache[cacheKey] = rankCacheEntry{revision: revision, createdAt: now, keys: append([]MetricKey(nil), keys...), candidates: append([]Candidate(nil), candidates...)}
+	}
+	s.access.Unlock()
 	return candidates
+}
+
+func rankCacheKey(keys []MetricKey) string {
+	var builder strings.Builder
+	for _, key := range keys {
+		builder.WriteString(key.Group)
+		builder.WriteByte(0)
+		builder.WriteString(key.Target)
+		builder.WriteByte(0)
+		builder.WriteString(key.ASN)
+		builder.WriteByte(0)
+		builder.WriteString(key.Network)
+		builder.WriteByte(0)
+		builder.WriteString(key.Node)
+		builder.WriteByte(0)
+	}
+	return builder.String()
+}
+
+func metricKeysEqual(left, right []MetricKey) bool {
+	return len(left) == len(right) && allEqual(left, right)
+}
+
+func allEqual(left, right []MetricKey) bool {
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // GroupWeights aggregates a group's learned weights across targets and
@@ -236,6 +414,12 @@ func (s *Store) GroupWeights(now time.Time, group string, nodes []string) []Node
 		lastUsed                   time.Time
 		samples                    int64
 		udpSamples                 int64
+		uploadTotal, downloadTotal float64
+		maxUpload, maxDownload     float64
+		durationMS                 float64
+		durationSamples            int64
+		lossRate                   float64
+		lossSamples                int64
 	}
 	byNode := make(map[string]*aggregate)
 	for key, entry := range s.metrics {
@@ -254,6 +438,14 @@ func (s *Store) GroupWeights(now time.Time, group string, nodes []string) []Node
 		agg.latencyMS = mergeAverage(agg.latencyMS, agg.latSamples, entry.LatencyMS, entry.LatencySamples)
 		agg.latSamples += entry.LatencySamples
 		agg.samples += entry.Success + entry.Failure
+		agg.uploadTotal += entry.UploadTotalMB
+		agg.downloadTotal += entry.DownloadTotalMB
+		agg.maxUpload = max(agg.maxUpload, entry.MaxUploadRateKB)
+		agg.maxDownload = max(agg.maxDownload, entry.MaxDownloadRateKB)
+		agg.durationMS = mergeAverage(agg.durationMS, agg.durationSamples, entry.DurationMS, entry.DurationSamples)
+		agg.durationSamples += entry.DurationSamples
+		agg.lossRate = mergeAverage(agg.lossRate, agg.lossSamples, entry.LossRate, entry.LossSamples)
+		agg.lossSamples += entry.LossSamples
 		if key.Network == "udp" {
 			agg.udpSamples += entry.Success + entry.Failure
 		}
@@ -273,20 +465,30 @@ func (s *Store) GroupWeights(now time.Time, group string, nodes []string) []Node
 		item := NodeRankItem{Name: node}
 		if agg := byNode[node]; agg != nil {
 			input := ModelInput{
-				Success:            agg.success,
-				Failure:            agg.failure,
-				ConnectTime:        time.Duration(agg.connectMS * float64(time.Millisecond)),
-				Latency:            time.Duration(agg.latencyMS * float64(time.Millisecond)),
-				UploadMB:           agg.latest.UploadMB,
-				DownloadMB:         agg.latest.DownloadMB,
-				MaxUploadRateKB:    agg.latest.MaxUploadRateKB,
-				MaxDownloadRateKB:  agg.latest.MaxDownloadRateKB,
-				ConnectionDuration: agg.latest.Duration,
-				LastUsed:           agg.lastUsed,
-				IsUDP:              agg.udpSamples > agg.samples/2,
-				ConnectionFailed:   !agg.latest.Success,
+				Success:                   agg.success,
+				Failure:                   agg.failure,
+				ConnectTime:               time.Duration(agg.connectMS * float64(time.Millisecond)),
+				Latency:                   time.Duration(agg.latencyMS * float64(time.Millisecond)),
+				UploadMB:                  agg.latest.UploadMB,
+				DownloadMB:                agg.latest.DownloadMB,
+				MaxUploadRateKB:           agg.latest.MaxUploadRateKB,
+				MaxDownloadRateKB:         agg.latest.MaxDownloadRateKB,
+				ConnectionDuration:        agg.latest.Duration,
+				HistoryUploadMB:           agg.uploadTotal,
+				HistoryDownloadMB:         agg.downloadTotal,
+				HistoryMaxUploadRateKB:    agg.maxUpload,
+				HistoryMaxDownloadRateKB:  agg.maxDownload,
+				HistoryConnectionDuration: time.Duration(agg.durationMS * float64(time.Millisecond)),
+				LossRate:                  agg.latest.LossRate,
+				CumulativeLossRate:        agg.lossRate,
+				LastUsed:                  agg.lastUsed,
+				IsUDP:                     agg.udpSamples > agg.samples/2,
+				ConnectionFailed:          !agg.latest.Success,
 			}
 			if weight, insufficient := calculateWeight(input, now, s.config.MinSamples); !insufficient {
+				if s.config.WeightFactor != nil {
+					weight *= s.config.WeightFactor(node)
+				}
 				item.Weight = weight
 			}
 		}
@@ -316,6 +518,7 @@ func (s *Store) Clear() {
 	s.access.Lock()
 	defer s.access.Unlock()
 	s.metrics = make(map[MetricKey]*metric)
+	s.rankCache = make(map[string]rankCacheEntry)
 	s.revision++
 }
 
@@ -370,15 +573,23 @@ func (s *Store) SnapshotAndRevision(now time.Time, retention time.Duration, maxE
 			continue
 		}
 		metrics = append(metrics, MetricSnapshot{
-			Key:            key,
-			Success:        entry.Success,
-			Failure:        entry.Failure,
-			ConnectMS:      entry.ConnectMS,
-			LatencyMS:      entry.LatencyMS,
-			ConnectSamples: entry.ConnectSamples,
-			LatencySamples: entry.LatencySamples,
-			Latest:         entry.Latest,
-			LastUsed:       entry.LastUsed,
+			Key:               key,
+			Success:           entry.Success,
+			Failure:           entry.Failure,
+			ConnectMS:         entry.ConnectMS,
+			LatencyMS:         entry.LatencyMS,
+			ConnectSamples:    entry.ConnectSamples,
+			LatencySamples:    entry.LatencySamples,
+			Latest:            entry.Latest,
+			UploadTotalMB:     entry.UploadTotalMB,
+			DownloadTotalMB:   entry.DownloadTotalMB,
+			MaxUploadRateKB:   entry.MaxUploadRateKB,
+			MaxDownloadRateKB: entry.MaxDownloadRateKB,
+			DurationMS:        entry.DurationMS,
+			DurationSamples:   entry.DurationSamples,
+			LossRate:          entry.LossRate,
+			LossSamples:       entry.LossSamples,
+			LastUsed:          entry.LastUsed,
 		})
 	}
 	s.access.RUnlock()
@@ -393,7 +604,7 @@ func (s *Store) SnapshotAndRevision(now time.Time, retention time.Duration, maxE
 // Store. Loading an oversized history file must not temporarily retain every
 // decoded metric in memory.
 func PruneSnapshot(snapshot Snapshot, now time.Time, retention time.Duration, maxEntries int) Snapshot {
-	if snapshot.Version != SnapshotVersion {
+	if snapshot.Version == 0 || snapshot.Version > SnapshotVersion {
 		return snapshot
 	}
 	metrics := make([]MetricSnapshot, 0, len(snapshot.Metrics))
@@ -428,7 +639,7 @@ func (s *Store) MarkFlushed(revision uint64) {
 // Restore replaces persisted metric data. Circuit-breaker state remains empty
 // by design because it is runtime-only.
 func (s *Store) Restore(snapshot Snapshot) bool {
-	if snapshot.Version != SnapshotVersion {
+	if snapshot.Version == 0 || snapshot.Version > SnapshotVersion {
 		return false
 	}
 	snapshot = PruneSnapshot(snapshot, time.Time{}, 0, s.config.MaxEntries)
@@ -440,14 +651,22 @@ func (s *Store) Restore(snapshot Snapshot) bool {
 			continue
 		}
 		s.metrics[persisted.Key] = &metric{
-			Success:        persisted.Success,
-			Failure:        persisted.Failure,
-			ConnectMS:      persisted.ConnectMS,
-			LatencyMS:      persisted.LatencyMS,
-			ConnectSamples: persisted.ConnectSamples,
-			LatencySamples: persisted.LatencySamples,
-			Latest:         persisted.Latest,
-			LastUsed:       persisted.LastUsed,
+			Success:           persisted.Success,
+			Failure:           persisted.Failure,
+			ConnectMS:         persisted.ConnectMS,
+			LatencyMS:         persisted.LatencyMS,
+			ConnectSamples:    persisted.ConnectSamples,
+			LatencySamples:    persisted.LatencySamples,
+			Latest:            persisted.Latest,
+			UploadTotalMB:     persisted.UploadTotalMB,
+			DownloadTotalMB:   persisted.DownloadTotalMB,
+			MaxUploadRateKB:   persisted.MaxUploadRateKB,
+			MaxDownloadRateKB: persisted.MaxDownloadRateKB,
+			DurationMS:        persisted.DurationMS,
+			DurationSamples:   persisted.DurationSamples,
+			LossRate:          persisted.LossRate,
+			LossSamples:       persisted.LossSamples,
+			LastUsed:          persisted.LastUsed,
 		}
 	}
 	s.revision = 0
@@ -459,7 +678,7 @@ func (s *Store) Restore(snapshot Snapshot) bool {
 // while a shared history file was temporarily unreadable. Breaker state is
 // always kept in memory because it is intentionally not persisted.
 func (s *Store) Merge(snapshot Snapshot) bool {
-	if snapshot.Version != SnapshotVersion {
+	if snapshot.Version == 0 || snapshot.Version > SnapshotVersion {
 		return false
 	}
 	snapshot = PruneSnapshot(snapshot, time.Time{}, 0, s.config.MaxEntries)
@@ -473,14 +692,22 @@ func (s *Store) Merge(snapshot Snapshot) bool {
 		if current == nil {
 			s.trimLocked(s.config.MaxEntries)
 			s.metrics[persisted.Key] = &metric{
-				Success:        persisted.Success,
-				Failure:        persisted.Failure,
-				ConnectMS:      persisted.ConnectMS,
-				LatencyMS:      persisted.LatencyMS,
-				ConnectSamples: persisted.ConnectSamples,
-				LatencySamples: persisted.LatencySamples,
-				Latest:         persisted.Latest,
-				LastUsed:       persisted.LastUsed,
+				Success:           persisted.Success,
+				Failure:           persisted.Failure,
+				ConnectMS:         persisted.ConnectMS,
+				LatencyMS:         persisted.LatencyMS,
+				ConnectSamples:    persisted.ConnectSamples,
+				LatencySamples:    persisted.LatencySamples,
+				Latest:            persisted.Latest,
+				UploadTotalMB:     persisted.UploadTotalMB,
+				DownloadTotalMB:   persisted.DownloadTotalMB,
+				MaxUploadRateKB:   persisted.MaxUploadRateKB,
+				MaxDownloadRateKB: persisted.MaxDownloadRateKB,
+				DurationMS:        persisted.DurationMS,
+				DurationSamples:   persisted.DurationSamples,
+				LossRate:          persisted.LossRate,
+				LossSamples:       persisted.LossSamples,
+				LastUsed:          persisted.LastUsed,
 			}
 			continue
 		}
@@ -494,6 +721,14 @@ func (s *Store) Merge(snapshot Snapshot) bool {
 			current.LastUsed = persisted.LastUsed
 			current.Latest = persisted.Latest
 		}
+		current.UploadTotalMB += persisted.UploadTotalMB
+		current.DownloadTotalMB += persisted.DownloadTotalMB
+		current.MaxUploadRateKB = max(current.MaxUploadRateKB, persisted.MaxUploadRateKB)
+		current.MaxDownloadRateKB = max(current.MaxDownloadRateKB, persisted.MaxDownloadRateKB)
+		current.DurationMS = mergeAverage(persisted.DurationMS, persisted.DurationSamples, current.DurationMS, current.DurationSamples)
+		current.DurationSamples += persisted.DurationSamples
+		current.LossRate = mergeAverage(persisted.LossRate, persisted.LossSamples, current.LossRate, current.LossSamples)
+		current.LossSamples += persisted.LossSamples
 	}
 	return true
 }

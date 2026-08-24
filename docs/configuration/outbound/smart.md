@@ -6,6 +6,9 @@
   "tag": "smart",
   "outbounds": ["proxy-a", "proxy-b"],
   "providers": ["provider-a"],
+  "exclude": "",
+  "include": "",
+  "use_all_providers": false,
   "url": "https://www.gstatic.com/generate_204",
   "interval": "10m",
   "timeout": "5s",
@@ -15,15 +18,38 @@
   "max_failed_times": 3,
   "history_path": "smart-history.json",
   "history_retention": "168h",
-  "max_history_entries": 50000
+  "max_history_entries": 50000,
+  "policy_priority": "premium:0.8;backup:1.2",
+  "use_lightgbm": false,
+  "collect_data": false,
+  "sample_rate": 1,
+  "prefer_asn": false,
+  "disable_udp": false,
+  "expected_status": "200-299,302"
 }
 ```
 
 ### Fields
 
-#### outbounds, providers, exclude, include, use_all_providers
+#### outbounds
 
-Candidate outbound and provider configuration. Provider candidates are expanded to leaf outbounds.
+List of candidate outbound tags.
+
+#### providers
+
+List of [Provider](/configuration/provider) tags. Provider candidates are expanded to leaf outbounds.
+
+#### exclude
+
+Regular expression for excluding candidates from `providers`.
+
+#### include
+
+Regular expression for including candidates from `providers`.
+
+#### use_all_providers
+
+Use every configured provider as a candidate. The default is `false`.
 
 #### url
 
@@ -65,8 +91,40 @@ Maximum age of an unused metric entry. The default is `168h`.
 
 Maximum retained metric entries per Smart group. The default is `50000`.
 
+#### policy_priority
+
+Ordered, semicolon-separated `pattern:factor` rules that multiply a node's Smart weight. The first matching rule wins; factors must be greater than zero. A colon in a pattern must be escaped, for example `name\\:edge:0.8`.
+
+#### use_lightgbm
+
+Use the shared LightGBM model after it has been loaded and enough samples exist. If no local model exists, enabling this starts a background download on first use; it falls back to traditional scoring until then. The default is `false`. See [Smart](/configuration/smart/) for model settings.
+
+#### collect_data
+
+Append model-training samples to the shared CSV collector. The default is `false`. See [Smart](/configuration/smart/) for collector settings.
+
+#### sample_rate
+
+Fraction of eligible observations recorded when `collect_data` is enabled. It must be between `0` and `1`; `0` uses the default rate of `1`.
+
+#### prefer_asn
+
+Include the destination ASN in Smart metrics. The default is `false`. It has no effect until the shared ASN mirror is fully available. See [Smart](/configuration/smart/) for mirror settings.
+
+#### disable_udp
+
+Disable UDP for this Smart group. The default is `false`.
+
+#### expected_status
+
+Allowed HTTP response status codes for active URL tests. Use comma-separated status codes or inclusive ranges, for example `204,301-304`. Empty or `*` accepts every HTTP status.
+
 ### Behavior
 
 Smart learns independently for each target, network, and leaf outbound. It uses the most recent closed connection for traffic-scene classification and historical success, connect time, and latency for mihomo-compatible weighting. URL tests provide only cold-start and fallback ordering and do not modify target metrics.
 
 The Clash API exposes read-only Smart status in the `smart` object of group proxy responses. It reports the last successful candidate and the most recent ranking snapshot. Smart does not provide manual selection or interrupt existing connections.
+
+### Acknowledgements
+
+Smart behavior and its LightGBM integration are based on [vernesong/mihomo](https://github.com/vernesong/mihomo).

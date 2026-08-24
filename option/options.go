@@ -27,6 +27,7 @@ type _Options struct {
 	Outbounds            []Outbound            `json:"outbounds,omitempty"`
 	Providers            []Provider            `json:"providers,omitempty"`
 	Route                *RouteOptions         `json:"route,omitempty"`
+	Smart                *SmartOptions         `json:"smart,omitempty"`
 	Services             []Service             `json:"services,omitempty"`
 	Experimental         *ExperimentalOptions  `json:"experimental,omitempty"`
 }
@@ -93,6 +94,12 @@ func checkOptions(options *Options) error {
 	err = checkHTTPClients(options.HTTPClients)
 	if err != nil {
 		return err
+	}
+	if options.Smart != nil {
+		err = options.Smart.Validate()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
