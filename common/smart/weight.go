@@ -44,14 +44,24 @@ type ModelInput struct {
 	ConnectTime time.Duration
 	Latency     time.Duration
 
-	UploadMB           float64
-	DownloadMB         float64
-	MaxUploadRateKB    float64
-	MaxDownloadRateKB  float64
-	ConnectionDuration time.Duration
-	LastUsed           time.Time
-	IsUDP              bool
-	ConnectionFailed   bool
+	UploadMB                  float64
+	DownloadMB                float64
+	MaxUploadRateKB           float64
+	MaxDownloadRateKB         float64
+	ConnectionDuration        time.Duration
+	HistoryUploadMB           float64
+	HistoryDownloadMB         float64
+	HistoryMaxUploadRateKB    float64
+	HistoryMaxDownloadRateKB  float64
+	HistoryConnectionDuration time.Duration
+	LossRate                  float64
+	CumulativeLossRate        float64
+	ASN                       string
+	Target                    string
+	DestinationIP             string
+	LastUsed                  time.Time
+	IsUDP                     bool
+	ConnectionFailed          bool
 }
 
 // TimeDecay matches mihomo's current hourly-bucketed piecewise decay curve.
