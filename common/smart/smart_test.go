@@ -73,7 +73,7 @@ func TestStoreUsesLatestClosedObservationForScene(t *testing.T) {
 	if metric == nil || metric.Latest.UploadMB >= 0.005 {
 		t.Fatalf("latest closed observation was not retained: %+v", metric)
 	}
-	if scene := IdentifyConnectionScene(metric.modelInput(key.Network)); scene != SceneWeb {
+	if scene := IdentifyConnectionScene(metric.modelInput(key)); scene != SceneWeb {
 		t.Fatalf("latest web observation inherited old transfer scene: %v", scene)
 	}
 }
@@ -99,7 +99,7 @@ func TestStoreUsesUDPModelForUDPCandidates(t *testing.T) {
 		store.Record(now, tcp, observation)
 		store.Record(now, udp, observation)
 	}
-	if !store.metrics[udp].modelInput(udp.Network).IsUDP {
+	if !store.metrics[udp].modelInput(udp).IsUDP {
 		t.Fatal("UDP metric did not reach the UDP scoring model")
 	}
 	tcpWeight := store.Candidate(now, tcp).Weight
