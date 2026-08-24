@@ -5169,6 +5169,72 @@
         "v2ray_api": {
           "$ref": "#/$defs/V2RayAPIOptions"
         },
+        "smart": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "download_url": {
+                  "type": "string"
+                },
+                "auto_update": {
+                  "type": "boolean"
+                },
+                "update_interval": {
+                  "type": "string",
+                  "pattern": "^\\+?(((\\d+(\\.\\d*)?|\\.\\d+)(ns|us|\\u00b5s|\\u03bcs|ms|s|m|h|d))+|0)$"
+                },
+                "http_client": {
+                  "$ref": "#/$defs/HTTPClientReference"
+                }
+              },
+              "additionalProperties": false
+            },
+            "asn": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "asset_path": {
+                  "type": "string"
+                },
+                "update_interval": {
+                  "type": "string",
+                  "pattern": "^\\+?(((\\d+(\\.\\d*)?|\\.\\d+)(ns|us|\\u00b5s|\\u03bcs|ms|s|m|h|d))+|0)$"
+                },
+                "http_client": {
+                  "$ref": "#/$defs/HTTPClientReference"
+                }
+              },
+              "additionalProperties": false
+            },
+            "collector": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "max_size": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
         "debug": {
           "$ref": "#/$defs/DebugOptions"
         },
@@ -13161,6 +13227,29 @@
             "max_history_entries": {
               "type": "integer",
               "minimum": 0
+            },
+            "policy_priority": {
+              "type": "string"
+            },
+            "use_lightgbm": {
+              "type": "boolean"
+            },
+            "collect_data": {
+              "type": "boolean"
+            },
+            "sample_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "prefer_asn": {
+              "type": "boolean"
+            },
+            "disable_udp": {
+              "type": "boolean"
+            },
+            "expected_status": {
+              "type": "string"
             }
           },
           "required": [
