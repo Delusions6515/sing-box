@@ -20,6 +20,7 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/httpclient"
 	"github.com/sagernet/sing-box/common/netns"
+	"github.com/sagernet/sing-box/common/smartservice"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -63,6 +64,7 @@ type Box struct {
 	connection          *route.ConnectionManager
 	router              *route.Router
 	httpClientService   adapter.LifecycleService
+	smartService        *smartservice.Service
 	internalService     []adapter.LifecycleService
 	reloadChan          chan struct{}
 	done                chan struct{}
@@ -257,6 +259,13 @@ func New(options Options) (*Box, error) {
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
 	service.MustRegister[adapter.HTTPClientManager](ctx, httpClientManager)
 	httpClientService := adapter.LifecycleService(httpClientManager)
+	var smartService *smartservice.Service
+	if experimentalOptions.Smart != nil || common.Any(options.Outbounds, func(outbound option.Outbound) bool {
+		return outbound.Type == C.TypeSmart
+	}) {
+		smartService = smartservice.NewService(ctx, logFactory.NewLogger("smart"), common.PtrValueOrDefault(experimentalOptions.Smart))
+		service.MustRegister[*smartservice.Service](ctx, smartService)
+	}
 	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions, reloadChan)
 	service.MustRegister[adapter.Router](ctx, router)
 	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
@@ -533,6 +542,7 @@ func New(options Options) (*Box, error) {
 		connection:          connectionManager,
 		router:              router,
 		httpClientService:   httpClientService,
+		smartService:        smartService,
 		createdAt:           createdAt,
 		debugOptions:        debugOptions,
 		logFactory:          logFactory,
@@ -605,6 +615,12 @@ func (s *Box) preStart() error {
 	err = adapter.Start(s.ctx, s.logger, adapter.StartStateStart, s.outbound, s.dnsTransport, s.network, s.connection)
 	if err != nil {
 		return err
+	}
+	if s.smartService != nil {
+		err = adapter.StartNamed(s.ctx, s.logger, adapter.StartStateStart, []adapter.LifecycleService{s.smartService})
+		if err != nil {
+			return err
+		}
 	}
 	err = adapter.StartNamed(s.ctx, s.logger, adapter.StartStateStart, []adapter.LifecycleService{s.httpClientService})
 	if err != nil {
@@ -694,6 +710,13 @@ func (s *Box) Close() error {
 		done()
 	}
 	if s.httpClientService != nil {
+		if s.smartService != nil {
+			done := adapter.LogElapsed(s.logger, "close ", s.smartService.Name())
+			err = E.Append(err, s.smartService.Close(), func(err error) error {
+				return E.Cause(err, "close ", s.smartService.Name())
+			})
+			done()
+		}
 		s.logger.Trace("close ", s.httpClientService.Name())
 		startTime := time.Now()
 		err = E.Append(err, s.httpClientService.Close(), func(err error) error {

@@ -94,6 +94,12 @@ func checkOptions(options *Options) error {
 	if err != nil {
 		return err
 	}
+	if options.Experimental != nil && options.Experimental.Smart != nil {
+		err = options.Experimental.Smart.Validate()
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
