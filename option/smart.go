@@ -1,9 +1,7 @@
 package option
 
 import (
-	"path"
 	"reflect"
-	"strings"
 
 	"github.com/sagernet/sing-box/schema"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -32,9 +30,7 @@ type SmartCollectorOptions struct {
 
 type SmartASNOptions struct {
 	Path           string             `json:"path,omitempty"`
-	Repository     string             `json:"repository,omitempty"`
-	Branch         string             `json:"branch,omitempty"`
-	AssetPath      string             `json:"asset_path,omitempty"`
+	URL            string             `json:"url,omitempty"`
 	UpdateInterval badoption.Duration `json:"update_interval,omitempty"`
 	HTTPClient     *HTTPClientOptions `json:"http_client,omitempty"`
 }
@@ -42,17 +38,6 @@ type SmartASNOptions struct {
 func (o SmartOptions) Validate() error {
 	if o.Model.UpdateInterval < 0 || o.ASN.UpdateInterval < 0 {
 		return E.New("invalid smart update_interval")
-	}
-	if repository := o.ASN.Repository; repository != "" {
-		owner, name, found := strings.Cut(repository, "/")
-		if !found || owner == "" || name == "" || strings.Contains(name, "/") {
-			return E.New("invalid smart ASN repository")
-		}
-	}
-	if assetPath := o.ASN.AssetPath; assetPath != "" {
-		if path.IsAbs(assetPath) || path.Clean(assetPath) != assetPath || assetPath == "." || strings.HasPrefix(assetPath, "../") || strings.Contains(assetPath, "/../") {
-			return E.New("invalid smart ASN asset_path")
-		}
 	}
 	return nil
 }

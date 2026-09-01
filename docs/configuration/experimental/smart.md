@@ -14,10 +14,8 @@
     "max_size": 104857600
   },
   "asn": {
-    "path": "smart/asn",
-    "repository": "MetaCubeX/meta-rules-dat",
-    "branch": "sing",
-    "asset_path": "asn",
+    "path": "smart/asn/GeoLite2-ASN.mmdb",
+    "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",
     "update_interval": "24h",
     "http_client": ""
   }
@@ -62,31 +60,23 @@ Maximum collection file size in bytes. The default is `104857600` (100 MiB).
 
 ### asn
 
-Shared ASN SRS mirror settings. The mirror is synchronized in the background on startup and then periodically. The source commit archive is fully extracted before a new index is published. Until a complete local index is available, `prefer_asn` uses normal target weights.
+Shared ASN database settings. Uses the `GeoLite2-ASN.mmdb` (MaxMind format) release asset of [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat). The local database is loaded at startup, and the upstream release asset is checked periodically over HTTP with ETag/304 change detection; a changed asset is downloaded and published atomically. Until the database is available, `prefer_asn` uses normal target weights.
 
 #### path
 
-Local ASN mirror directory. The default is `smart/asn`.
+Local ASN database file path. The default is `smart/asn/GeoLite2-ASN.mmdb`.
 
-#### repository
+#### url
 
-GitHub repository in `owner/repository` format. The default is `MetaCubeX/meta-rules-dat`.
-
-#### branch
-
-Repository branch. The default is `sing`.
-
-#### asset_path
-
-Directory containing `AS<number>.srs` assets. The default is `asn`.
+Database download URL. The default is `https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb`. An HTTP ETag tracks changes: an unchanged asset is skipped with a 304 response.
 
 #### update_interval
 
-ASN mirror update interval. The default is `24h`.
+ASN database update interval. The default is `24h`.
 
 #### http_client
 
-HTTP client used to synchronize the ASN mirror. The default HTTP client is used if empty.
+HTTP client used to synchronize the ASN database. The default HTTP client is used if empty.
 
 ### Acknowledgements
 

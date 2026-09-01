@@ -12,16 +12,17 @@ import (
 
 func TestSmartASNSourceValidation(t *testing.T) {
 	for name, options := range map[string]SmartOptions{
-		"valid":              {ASN: SmartASNOptions{Repository: "example/rules", Branch: "stable", AssetPath: "sing/asn"}},
-		"invalid repository": {ASN: SmartASNOptions{Repository: "https://example.com/rules"}},
-		"invalid asset path": {ASN: SmartASNOptions{AssetPath: "../asn"}},
+		"valid":                {ASN: SmartASNOptions{}},
+		"valid URL":            {ASN: SmartASNOptions{URL: "https://example.com/GeoLite2-ASN.mmdb"}},
+		"invalid interval":     {ASN: SmartASNOptions{UpdateInterval: -1}},
+		"invalid asn interval": {ASN: SmartASNOptions{UpdateInterval: -1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := options.Validate()
-			if name == "valid" {
-				require.NoError(t, err)
-			} else {
+			if name == "invalid interval" || name == "invalid asn interval" {
 				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -31,14 +32,12 @@ func TestSmartASNSourceJSON(t *testing.T) {
 	var options SmartOptions
 	require.NoError(t, json.Unmarshal([]byte(`{
   "asn": {
-    "repository": "example/rules",
-    "branch": "stable",
-    "asset_path": "sing/asn"
+    "path": "smart/asn/GeoLite2-ASN.mmdb",
+    "url": "https://example.com/GeoLite2-ASN.mmdb"
   }
 }`), &options))
-	require.Equal(t, "example/rules", options.ASN.Repository)
-	require.Equal(t, "stable", options.ASN.Branch)
-	require.Equal(t, "sing/asn", options.ASN.AssetPath)
+	require.Equal(t, "smart/asn/GeoLite2-ASN.mmdb", options.ASN.Path)
+	require.Equal(t, "https://example.com/GeoLite2-ASN.mmdb", options.ASN.URL)
 }
 
 func TestSmartOptionsSchema(t *testing.T) {
