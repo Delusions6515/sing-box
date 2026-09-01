@@ -14,10 +14,8 @@
     "max_size": 104857600
   },
   "asn": {
-    "path": "smart/asn",
-    "repository": "MetaCubeX/meta-rules-dat",
-    "branch": "sing",
-    "asset_path": "asn",
+    "path": "smart/asn/GeoLite2-ASN.mmdb",
+    "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",
     "update_interval": "24h",
     "http_client": ""
   }
@@ -62,31 +60,23 @@
 
 ### asn
 
-共享 ASN SRS 镜像设置。镜像会在启动后后台同步，并按周期更新。会先完整提取来源提交的归档，再发布新索引。完整本地索引可用前，`prefer_asn` 使用普通目标权重。
+共享 ASN 数据库设置。使用 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) release 的 `GeoLite2-ASN.mmdb`（MaxMind 格式）。启动时加载本地数据库，并按周期通过 HTTP ETag/304 判断上游资产是否有变化，变化时下载并原子替换。数据库可用前，`prefer_asn` 使用普通目标权重。
 
 #### path
 
-本地 ASN 镜像目录。默认 `smart/asn`。
+本地 ASN 数据库文件路径。默认 `smart/asn/GeoLite2-ASN.mmdb`。
 
-#### repository
+#### url
 
-GitHub 仓库，格式为 `owner/repository`。默认 `MetaCubeX/meta-rules-dat`。
-
-#### branch
-
-仓库分支。默认 `sing`。
-
-#### asset_path
-
-包含 `AS<number>.srs` 资源的目录。默认 `asn`。
+数据库下载地址。默认 `https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb`。通过 HTTP ETag 判断变更：资源未变化时以 304 跳过下载。
 
 #### update_interval
 
-ASN 镜像更新周期。默认 `24h`。
+ASN 数据库更新周期。默认 `24h`。
 
 #### http_client
 
-用于同步 ASN 镜像的 HTTP 客户端。为空时使用默认 HTTP 客户端。
+用于同步 ASN 数据库的 HTTP 客户端。为空时使用默认 HTTP 客户端。
 
 ### 致谢
 

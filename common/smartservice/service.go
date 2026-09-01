@@ -1,31 +1,25 @@
 package smartservice
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/oschwald/maxminddb-golang"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/smart"
-	"github.com/sagernet/sing-box/common/srs"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -40,17 +34,13 @@ const (
 	defaultModelInterval        = 72 * time.Hour
 	defaultCollectorPath        = "smart/smart_weight_data.csv"
 	defaultCollectorMaxSize     = 100 * 1024 * 1024
-	defaultASNPath              = "smart/asn"
+	defaultASNPath              = "smart/asn/GeoLite2-ASN.mmdb"
+	defaultASNURL               = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
 	defaultASNInterval          = 24 * time.Hour
 	defaultHTTPTimeout          = 90 * time.Second
 	defaultASNHTTPTimeout       = 10 * time.Minute
-	defaultASNRepository        = "MetaCubeX/meta-rules-dat"
-	defaultASNBranch            = "sing"
-	defaultASNAssetPath         = "asn"
-	asnManifestVersion          = 3
-	maxASNDownloadBytes     int = 32 << 20
+	maxASNDownloadBytes     int = 128 << 20
 	maxModelDownloadBytes   int = 128 << 20
-	maxASNArchiveBytes      int = 512 << 20
 )
 
 var ErrModelUpdateInProgress = errors.New("LightGBM model is updating")
@@ -70,20 +60,18 @@ type Service struct {
 	collectorPath    string
 	collectorMaxSize uint64
 	asnPath          string
+	asnURL           string
 	asnInterval      time.Duration
-	asnRepository    string
-	asnBranch        string
-	asnAssetPath     string
+	asnEtag          string
 
 	httpClient    *http.Client
 	asnHTTPClient *http.Client
-	githubAPIURL  string
 
 	modelAccess       sync.RWMutex
 	model             *leaves.Ensemble
 	modelUpdateAccess sync.Mutex
 	modelEnabled      atomic.Bool
-	index             atomic.Pointer[asnIndex]
+	asnReader         atomic.Pointer[maxminddb.Reader]
 
 	collectorAccess sync.Mutex
 	collectorFile   *os.File
@@ -109,17 +97,9 @@ func NewService(ctx context.Context, logger log.ContextLogger, options option.Sm
 	if asnPath == "" {
 		asnPath = defaultASNPath
 	}
-	asnRepository := options.ASN.Repository
-	if asnRepository == "" {
-		asnRepository = defaultASNRepository
-	}
-	asnBranch := options.ASN.Branch
-	if asnBranch == "" {
-		asnBranch = defaultASNBranch
-	}
-	asnAssetPath := options.ASN.AssetPath
-	if asnAssetPath == "" {
-		asnAssetPath = defaultASNAssetPath
+	asnURL := options.ASN.URL
+	if asnURL == "" {
+		asnURL = defaultASNURL
 	}
 	modelInterval := time.Duration(options.Model.UpdateInterval)
 	if modelInterval == 0 {
@@ -148,10 +128,8 @@ func NewService(ctx context.Context, logger log.ContextLogger, options option.Sm
 		collectorPath:    absoluteSmartPath(ctx, collectorPath),
 		collectorMaxSize: collectorMaxSize,
 		asnPath:          absoluteSmartPath(ctx, asnPath),
+		asnURL:           asnURL,
 		asnInterval:      asnInterval,
-		asnRepository:    asnRepository,
-		asnBranch:        asnBranch,
-		asnAssetPath:     asnAssetPath,
 	}
 }
 
@@ -459,243 +437,79 @@ func (s *Service) openCollector() bool {
 	return true
 }
 
-type asnManifest struct {
-	Version   int        `json:"version"`
-	Source    string     `json:"source"`
-	Branch    string     `json:"branch"`
-	AssetPath string     `json:"asset_path"`
-	Revision  string     `json:"revision"`
-	Files     []asnAsset `json:"files"`
-}
-
-type asnAsset struct {
-	Path string `json:"path"`
-}
-
-type githubReference struct {
-	Object struct {
-		SHA  string `json:"sha"`
-		Type string `json:"type"`
-	} `json:"object"`
-}
-
+// loadASNMirror maps the local ASN database and remembers the ETag it was
+// fetched with, so unchanged upstream assets can be skipped (304).
 func (s *Service) loadASNMirror() error {
-	manifest, err := s.readASNManifest()
+	reader, err := maxminddb.Open(s.asnPath)
 	if err != nil {
 		return err
 	}
-	if !s.validASNManifest(manifest) {
-		return E.New("invalid Smart ASN manifest")
+	s.asnReader.Store(reader)
+	if etag, err := filemanager.ReadFile(s.ctx, s.asnPath+".etag"); err == nil {
+		s.asnEtag = strings.TrimSpace(string(etag))
 	}
-	index, err := s.buildASNIndex(filepath.Join(s.asnPath, "snapshots", manifest.Revision), manifest.Files)
-	if err != nil {
-		return err
-	}
-	index.revision = manifest.Revision
-	s.index.Store(index)
 	return nil
 }
 
-func (s *Service) readASNManifest() (asnManifest, error) {
-	content, err := filemanager.ReadFile(s.ctx, filepath.Join(s.asnPath, "manifest.json"))
-	if err != nil {
-		return asnManifest{}, err
-	}
-	var manifest asnManifest
-	if err = json.Unmarshal(content, &manifest); err != nil {
-		return asnManifest{}, err
-	}
-	return manifest, nil
-}
-
-func (s *Service) validASNManifest(manifest asnManifest) bool {
-	return manifest.Version == asnManifestVersion && manifest.Source == s.asnRepository && manifest.Branch == s.asnBranch && manifest.AssetPath == s.asnAssetPath && manifest.Revision != "" && len(manifest.Files) > 0
-}
-
-func sameASNManifest(saved, current asnManifest) bool {
-	return saved.Version == current.Version && saved.Source == current.Source && saved.Branch == current.Branch && saved.AssetPath == current.AssetPath && saved.Revision == current.Revision && len(saved.Files) > 0
-}
-
+// updateASN refreshes the ASN database when the upstream asset changed.
 func (s *Service) updateASN(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, defaultASNHTTPTimeout)
 	defer cancel()
-	manifest, err := s.fetchASNManifest(ctx)
-	if err != nil {
-		s.warn("update Smart ASN mirror: ", err)
-		return
-	}
-	savedManifest, savedErr := s.readASNManifest()
-	if loaded := s.index.Load(); loaded != nil && loaded.revision == manifest.Revision && savedErr == nil && sameASNManifest(savedManifest, manifest) {
-		s.pruneASNSnapshots(manifest.Revision)
-		return
-	}
-	root := filepath.Join(s.asnPath, "snapshots", manifest.Revision)
-	if savedErr == nil && sameASNManifest(savedManifest, manifest) {
-		if index, indexErr := s.buildASNIndex(root, savedManifest.Files); indexErr == nil {
-			manifest.Files = savedManifest.Files
-			if s.publishASN(manifest, index) {
-				s.pruneASNSnapshots(manifest.Revision)
-			}
-			return
-		}
-	}
-	staging := root + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	if err = filemanager.MkdirAll(s.ctx, staging, 0o755); err != nil {
-		s.warn("create Smart ASN staging directory: ", err)
-		return
-	}
-	defer filemanager.RemoveAll(s.ctx, staging)
-	if err = s.downloadASNArchive(ctx, &manifest, staging); err != nil {
-		s.warn("download Smart ASN archive: ", err)
-		return
-	}
-	index, err := s.buildASNIndex(staging, manifest.Files)
-	if err != nil {
-		s.warn("parse Smart ASN mirror: ", err)
-		return
-	}
-	if err = filemanager.MkdirAll(s.ctx, filepath.Dir(root), 0o755); err == nil {
-		_ = filemanager.RemoveAll(s.ctx, root)
-		err = filemanager.Rename(s.ctx, staging, root)
-	}
-	if err != nil {
-		s.warn("publish Smart ASN snapshot: ", err)
-		return
-	}
-	if s.publishASN(manifest, index) {
-		s.pruneASNSnapshots(manifest.Revision)
+	if err := s.fetchASN(ctx); err != nil {
+		s.warn("update Smart ASN database: ", err)
 	}
 }
 
-func (s *Service) publishASN(manifest asnManifest, index *asnIndex) bool {
-	content, err := json.Marshal(manifest)
-	if err != nil {
-		s.warn("encode Smart ASN manifest: ", err)
-		return false
-	}
-	manifestPath := filepath.Join(s.asnPath, "manifest.json")
-	if err = filemanager.MkdirAll(s.ctx, s.asnPath, 0o755); err == nil {
-		err = filemanager.WriteFile(s.ctx, manifestPath+".tmp", content, 0o600)
-	}
-	if err == nil {
-		err = filemanager.Rename(s.ctx, manifestPath+".tmp", manifestPath)
-	}
-	if err != nil {
-		s.warn("publish Smart ASN manifest: ", err)
-		return false
-	}
-	index.revision = manifest.Revision
-	s.index.Store(index)
-	return true
-}
-
-func (s *Service) pruneASNSnapshots(revision string) {
-	snapshotsPath := filepath.Join(s.asnPath, "snapshots")
-	entries, err := os.ReadDir(snapshotsPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			s.warn("read Smart ASN snapshots: ", err)
-		}
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == revision {
-			continue
-		}
-		if err = filemanager.RemoveAll(s.ctx, filepath.Join(snapshotsPath, entry.Name())); err != nil {
-			s.warn("remove old Smart ASN snapshot: ", err)
-		}
-	}
-}
-
-func (s *Service) fetchASNManifest(ctx context.Context) (asnManifest, error) {
-	content, err := s.downloadWith(s.asnClient(), ctx, s.githubAPI()+"/repos/"+s.asnRepository+"/git/ref/heads/"+url.PathEscape(s.asnBranch), maxASNDownloadBytes)
-	if err != nil {
-		return asnManifest{}, err
-	}
-	var reference githubReference
-	if err = json.Unmarshal(content, &reference); err != nil || reference.Object.SHA == "" || reference.Object.Type != "commit" {
-		return asnManifest{}, E.New("invalid Smart ASN branch reference")
-	}
-	return asnManifest{
-		Version:   asnManifestVersion,
-		Source:    s.asnRepository,
-		Branch:    s.asnBranch,
-		AssetPath: s.asnAssetPath,
-		Revision:  reference.Object.SHA,
-	}, nil
-}
-
-func (s *Service) downloadASNArchive(ctx context.Context, manifest *asnManifest, staging string) error {
-	client := s.asnClient()
-	if client == nil {
-		return E.New("Smart service is not ready")
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.githubAPI()+"/repos/"+manifest.Source+"/tarball/"+manifest.Revision, nil)
+// fetchASN downloads the ASN database and atomically publishes it. A 304
+// response (If-None-Match) skips the download; a body that does not parse as
+// a MaxMind database is discarded, matching remote rule-set behavior.
+func (s *Service) fetchASN(ctx context.Context) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.asnURL, nil)
 	if err != nil {
 		return err
 	}
-	response, err := client.Do(request)
+	if s.asnEtag != "" {
+		request.Header.Set("If-None-Match", s.asnEtag)
+	}
+	response, err := s.asnClient().Do(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return E.New("unexpected HTTP status: ", response.Status)
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotModified:
+		return nil
+	default:
+		return E.New("unexpected status: ", response.Status)
 	}
-	if response.ContentLength > int64(maxASNArchiveBytes) {
-		return E.New("ASN archive exceeds maximum size")
-	}
-	gzipReader, err := gzip.NewReader(io.LimitReader(response.Body, int64(maxASNArchiveBytes)+1))
+	content, err := io.ReadAll(io.LimitReader(response.Body, int64(maxASNDownloadBytes)+1))
 	if err != nil {
 		return err
 	}
-	defer gzipReader.Close()
-	archive := tar.NewReader(gzipReader)
-	assetPrefix := strings.TrimSuffix(manifest.AssetPath, "/") + "/"
-	manifest.Files = nil
-	for {
-		header, nextErr := archive.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			return nextErr
-		}
-		if header.Typeflag != tar.TypeReg || header.Size < 0 {
-			continue
-		}
-		_, archivePath, found := strings.Cut(header.Name, "/")
-		if !found || !strings.HasPrefix(archivePath, assetPrefix) {
-			continue
-		}
-		assetName := strings.TrimPrefix(archivePath, assetPrefix)
-		asn, valid := asnAssetNumber(assetName)
-		if !valid {
-			continue
-		}
-		if header.Size > int64(maxASNDownloadBytes) {
-			return E.New("Smart ASN asset exceeds maximum size: ", assetName)
-		}
-		content, readErr := io.ReadAll(io.LimitReader(archive, int64(maxASNDownloadBytes)+1))
-		if readErr != nil {
-			return readErr
-		}
-		if len(content) > maxASNDownloadBytes {
-			return E.New("Smart ASN asset exceeds maximum size: ", assetName)
-		}
-		if err = filemanager.WriteFile(s.ctx, filepath.Join(staging, assetName), content, 0o644); err != nil {
-			return err
-		}
-		manifest.Files = append(manifest.Files, asnAsset{Path: filepath.ToSlash(filepath.Join(manifest.AssetPath, asn+".srs"))})
+	if len(content) > maxASNDownloadBytes {
+		return E.New("download exceeds maximum size")
 	}
-	if len(manifest.Files) == 0 {
-		return E.New("no Smart ASN assets found")
+	if err = filemanager.MkdirAll(s.ctx, filepath.Dir(s.asnPath), 0o755); err == nil {
+		err = filemanager.WriteFile(s.ctx, s.asnPath+".tmp", content, 0o644)
 	}
-	if _, err = io.Copy(io.Discard, gzipReader); err != nil {
+	if err == nil {
+		err = filemanager.Rename(s.ctx, s.asnPath+".tmp", s.asnPath)
+	} else {
+		_ = filemanager.RemoveAll(s.ctx, s.asnPath+".tmp")
+	}
+	if err != nil {
+		return E.Cause(err, "publish Smart ASN database")
+	}
+	mmdb, err := maxminddb.Open(s.asnPath)
+	if err != nil {
 		return err
 	}
-	sort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })
+	s.asnReader.Store(mmdb)
+	if etag := response.Header.Get("Etag"); etag != "" {
+		s.asnEtag = etag
+		_ = filemanager.WriteFile(s.ctx, s.asnPath+".etag", []byte(etag), 0o644)
+	}
 	return nil
 }
 
@@ -736,139 +550,20 @@ func (s *Service) asnClient() *http.Client {
 	return s.httpClient
 }
 
-func (s *Service) githubAPI() string {
-	if s.githubAPIURL != "" {
-		return strings.TrimSuffix(s.githubAPIURL, "/")
-	}
-	return "https://api.github.com"
+type asnRecord struct {
+	Number uint32 `maxminddb:"autonomous_system_number"`
 }
 
-// LookupASN returns an AS label only after a fully parsed mirror has been
-// atomically published. This preserves normal target weights during first sync.
 func (s *Service) LookupASN(address netip.Addr) string {
-	index := s.index.Load()
-	if index == nil || !address.IsValid() {
+	reader := s.asnReader.Load()
+	if reader == nil || !address.IsValid() {
 		return ""
 	}
-	return index.lookup(address.Unmap())
-}
-
-type asnIndex struct {
-	v4       *asnTrie
-	v6       *asnTrie
-	revision string
-}
-
-type asnTrie struct {
-	children [2]*asnTrie
-	asn      string
-}
-
-func (s *Service) buildASNIndex(root string, assets []asnAsset) (*asnIndex, error) {
-	index := &asnIndex{v4: new(asnTrie), v6: new(asnTrie)}
-	for _, asset := range assets {
-		asn, loaded := asnAssetNumber(filepath.Base(asset.Path))
-		if !loaded {
-			return nil, E.New("invalid ASN asset path: ", asset.Path)
-		}
-		content, err := filemanager.ReadFile(s.ctx, filepath.Join(root, filepath.Base(asset.Path)))
-		if err != nil {
-			return nil, err
-		}
-		compat, err := srs.Read(bytes.NewReader(content), true)
-		if err != nil {
-			return nil, E.Cause(err, "read ", asset.Path)
-		}
-		for _, rule := range compat.Options.Rules {
-			for _, prefix := range srsPrefixes(rule) {
-				index.insert(prefix, asn)
-			}
-		}
+	var record asnRecord
+	if err := reader.Lookup(address.Unmap().AsSlice(), &record); err != nil || record.Number == 0 {
+		return ""
 	}
-	return index, nil
-}
-
-func isASNAssetPath(assetPath, sourcePath string) bool {
-	if sourcePath != "" {
-		prefix := strings.TrimSuffix(sourcePath, "/") + "/"
-		if !strings.HasPrefix(assetPath, prefix) {
-			return false
-		}
-		assetPath = strings.TrimPrefix(assetPath, prefix)
-	}
-	_, loaded := asnAssetNumber(assetPath)
-	return loaded
-}
-
-func asnAssetNumber(assetPath string) (string, bool) {
-	if strings.Contains(assetPath, "/") || !strings.HasPrefix(assetPath, "AS") || !strings.HasSuffix(assetPath, ".srs") {
-		return "", false
-	}
-	number := strings.TrimSuffix(strings.TrimPrefix(assetPath, "AS"), ".srs")
-	if number == "" || strings.Trim(number, "0123456789") != "" {
-		return "", false
-	}
-	return "AS" + number, true
-}
-
-func srsPrefixes(rule option.HeadlessRule) []netip.Prefix {
-	var prefixes []netip.Prefix
-	if rule.Type == "logical" {
-		for _, nested := range rule.LogicalOptions.Rules {
-			prefixes = append(prefixes, srsPrefixes(nested)...)
-		}
-		return prefixes
-	}
-	prefixes = make([]netip.Prefix, 0, len(rule.DefaultOptions.IPCIDR))
-	for _, value := range rule.DefaultOptions.IPCIDR {
-		prefix, err := netip.ParsePrefix(value)
-		if err == nil && prefix.IsValid() {
-			prefixes = append(prefixes, prefix.Masked())
-		}
-	}
-	return prefixes
-}
-
-func (i *asnIndex) insert(prefix netip.Prefix, asn string) {
-	trie := i.v6
-	address := prefix.Addr()
-	bytes := address.As16()
-	if address.Is4() {
-		trie = i.v4
-		v4 := address.As4()
-		copy(bytes[:], v4[:])
-	}
-	for index := 0; index < prefix.Bits(); index++ {
-		bit := (bytes[index/8] >> (7 - index%8)) & 1
-		if trie.children[bit] == nil {
-			trie.children[bit] = new(asnTrie)
-		}
-		trie = trie.children[bit]
-	}
-	trie.asn = asn
-}
-
-func (i *asnIndex) lookup(address netip.Addr) string {
-	trie := i.v6
-	bytes := address.As16()
-	bits := 128
-	if address.Is4() {
-		trie = i.v4
-		v4 := address.As4()
-		copy(bytes[:], v4[:])
-		bits = 32
-	}
-	result := trie.asn
-	for index := 0; index < bits; index++ {
-		trie = trie.children[(bytes[index/8]>>(7-index%8))&1]
-		if trie == nil {
-			break
-		}
-		if trie.asn != "" {
-			result = trie.asn
-		}
-	}
-	return result
+	return "AS" + strconv.FormatUint(uint64(record.Number), 10)
 }
 
 func (s *Service) warn(args ...any) {

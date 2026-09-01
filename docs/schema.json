@@ -5217,13 +5217,7 @@
                 "path": {
                   "type": "string"
                 },
-                "repository": {
-                  "type": "string"
-                },
-                "branch": {
-                  "type": "string"
-                },
-                "asset_path": {
+                "url": {
                   "type": "string"
                 },
                 "update_interval": {
