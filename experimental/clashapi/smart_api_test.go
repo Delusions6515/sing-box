@@ -20,6 +20,15 @@ type smartOutboundManager struct {
 
 func (m *smartOutboundManager) Outbounds() []adapter.Outbound { return m.outbounds }
 
+func (m *smartOutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
+	for _, outbound := range m.outbounds {
+		if outbound.Tag() == tag {
+			return outbound, true
+		}
+	}
+	return nil, false
+}
+
 type plainOutbound struct {
 	adapter.Outbound
 	tag string
