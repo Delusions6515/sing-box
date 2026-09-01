@@ -20,7 +20,10 @@ func TestProxyInfoRendersReadOnlySmartStatus(t *testing.T) {
 		UpdatedAt:  &updated,
 		Candidates: []adapter.SmartCandidateStatus{{Tag: "fast", Weight: 0.9, Samples: 3}},
 	}}
-	info := proxyInfo(&Server{urlTestHistory: urltest.NewHistoryStorage()}, detour)
+	info := proxyInfo(&Server{
+		outbound:       &smartOutboundManager{outbounds: []adapter.Outbound{&plainOutbound{tag: "fast"}}},
+		urlTestHistory: urltest.NewHistoryStorage(),
+	}, detour)
 	content, err := info.MarshalJSON()
 	require.NoError(t, err)
 	var decoded map[string]any
