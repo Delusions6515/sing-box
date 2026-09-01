@@ -38,7 +38,7 @@ type smartStartupTestOutbound struct {
 }
 
 func (o *smartStartupTestOutbound) DialContext(_ context.Context, _ string, destination M.Socksaddr) (net.Conn, error) {
-	if destination.AddrString() == "api.github.com" {
+	if destination.AddrString() == "github.com" {
 		select {
 		case o.dialed <- struct{}{}:
 		default:
