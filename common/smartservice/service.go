@@ -37,6 +37,7 @@ const (
 	defaultASNPath              = "smart/asn/GeoLite2-ASN.mmdb"
 	defaultASNURL               = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
 	defaultASNInterval          = 24 * time.Hour
+	asnRetryInterval            = time.Minute
 	defaultHTTPTimeout          = 90 * time.Second
 	defaultASNHTTPTimeout       = 10 * time.Minute
 	maxASNDownloadBytes     int = 128 << 20
@@ -228,6 +229,9 @@ func (s *Service) loop(ctx context.Context) {
 	s.update(ctx)
 	modelTicker := time.NewTicker(s.modelInterval)
 	asnTicker := time.NewTicker(s.asnInterval)
+	if s.asnReader.Load() == nil {
+		asnTicker.Reset(asnRetryInterval)
+	}
 	defer modelTicker.Stop()
 	defer asnTicker.Stop()
 	for {
@@ -240,13 +244,20 @@ func (s *Service) loop(ctx context.Context) {
 			}
 		case <-asnTicker.C:
 			s.updateASN(ctx)
+			if s.asnReader.Load() == nil {
+				asnTicker.Reset(asnRetryInterval)
+			} else {
+				asnTicker.Reset(s.asnInterval)
+			}
 		}
 	}
 }
 
 func (s *Service) update(ctx context.Context) {
-	s.updateInitialModel(ctx)
+	// ASN database first: it is small and usually required immediately,
+	// while the initial model download can take a while (or time out).
 	s.updateASN(ctx)
+	s.updateInitialModel(ctx)
 }
 
 func (s *Service) updateInitialModel(ctx context.Context) {
