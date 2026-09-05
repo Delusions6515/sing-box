@@ -11,49 +11,13 @@ import (
 	"testing"
 	"time"
 
-	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 
 	"golang.org/x/net/http2"
 )
 
-// lx: SPEC 082 — issue #14. See stream_error.go for why the http2.StreamError
+// lx: SPEC 082 — issue #14. See common/badh2 for why the http2.StreamError
 // type must not leave an XHTTP conn.
-
-func TestHideStreamError(t *testing.T) {
-	peerReset := http2.StreamError{StreamID: 21, Code: http2.ErrCodeInternal, Cause: errors.New("received from peer")}
-
-	hidden := hideStreamError(peerReset)
-	if hidden.Error() != peerReset.Error() {
-		t.Fatalf("text changed: %q != %q", hidden.Error(), peerReset.Error())
-	}
-	if _, isStreamError := hidden.(http2.StreamError); isStreamError {
-		t.Fatal("bare StreamError leaked through")
-	}
-	var target http2.StreamError
-	if errors.As(hidden, &target) {
-		t.Fatal("errors.As reaches the StreamError through the hidden error")
-	}
-
-	wrapped := hideStreamError(E.Cause(peerReset, "download"))
-	if errors.As(wrapped, &target) {
-		t.Fatal("wrapped StreamError leaked through")
-	}
-	if wrapped.Error() != "download: "+peerReset.Error() {
-		t.Fatalf("wrapped text changed: %q", wrapped.Error())
-	}
-
-	if hideStreamError(io.EOF) != io.EOF {
-		t.Fatal("io.EOF must pass through untouched")
-	}
-	if hideStreamError(nil) != nil {
-		t.Fatal("nil must pass through untouched")
-	}
-	other := errors.New("plain")
-	if hideStreamError(other) != other {
-		t.Fatal("unrelated errors must pass through untouched")
-	}
-}
 
 // resettingBody is a download body whose every Read is a peer stream reset —
 // what x/net's response body returns after RST_STREAM(INTERNAL_ERROR). It
@@ -73,7 +37,7 @@ func (b *resettingBody) Close() error { return nil }
 // in miniature: an x/net HTTP/2 client (what DoH with detour, a rule-set
 // download_detour or a chained outbound put on top of us) whose transport
 // connection IS an XHTTP stream conn, and the CDN resets that stream. Without
-// hideStreamError the consumer's readLoop sees http2.StreamError, `continue`s
+// badh2.HideStreamError the consumer's readLoop sees http2.StreamError, `continue`s
 // forever and never lets RoundTrip fail: the body is read millions of times
 // and the request only ends with the context. With it the readLoop exits on
 // the first read error and RoundTrip fails at once.
