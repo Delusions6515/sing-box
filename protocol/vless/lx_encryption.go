@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing/common"
@@ -28,13 +29,12 @@ import (
 // box. The dial deadline is therefore applied to the conn for the duration of
 // the handshake and cleared afterwards, so the caller's context governs it.
 //
-// WRITE side only, deliberately. The hang this guards against is a blocked Write
-// into an upload body nobody reads, so a read deadline buys nothing here — and it
-// would cost correctness: an XHTTP read deadline is one-shot (it closes the
-// late-bound download body, and clearing it cannot reopen that), so a handshake
-// that overran the dial deadline but still succeeded would hand back a conn whose
-// download side is already dead. SetDeadline covers both directions, hence the
-// narrower call.
+// WRITE side only, deliberately. A read deadline would cost correctness: an XHTTP
+// read deadline is one-shot (it closes the late-bound download body, and clearing
+// it cannot reopen that), so a handshake that overran the dial deadline but still
+// succeeded would hand back a conn whose download side is already dead. SetDeadline
+// covers both directions, hence the narrower call. The read side is bounded by
+// guardHandshake instead, which closes the conn only on the failure path.
 func (h *vlessDialer) wrapEncryption(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if h.encryption == nil {
 		return conn, nil
@@ -44,12 +44,65 @@ func (h *vlessDialer) wrapEncryption(ctx context.Context, conn net.Conn) (net.Co
 			defer conn.SetWriteDeadline(time.Time{})
 		}
 	}
+	finish := guardHandshake(ctx, conn)
 	encryptedConn, err := h.encryption.Handshake(conn)
+	if !finish() {
+		// The guard won the race and owns the conn: it closed it, which is what
+		// unblocked the handshake. Whatever Handshake returned rides on a dead
+		// conn, so drop it without closing — closing here would race the guard.
+		return nil, E.Cause(ctx.Err(), "encryption handshake")
+	}
 	if err != nil {
 		common.Close(conn)
 		return nil, E.Cause(err, "encryption handshake")
 	}
 	return encryptedConn, nil
+}
+
+// guardHandshake bounds the READ side of the handshake by the dial context and
+// returns a finish func reporting whether the handshake, not the guard, won.
+//
+// lx: 050 — Handshake ends in a blocking io.ReadFull for the server's reply. On a
+// node that accepts the connection and then says nothing that read never returns:
+// a bare TCP conn has no read deadline of its own, and on XHTTP the response body
+// is late-bound, so Read parks before there is even anything to time out. Nothing
+// above can intervene, because the conn has not been handed up yet — the caller is
+// still inside DialContext. That is how a URL test against a half-alive node turned
+// into a goroutine holding its outbound forever, outliving the box it belonged to.
+//
+// Closing the conn is the only lever that reaches a parked read, so the guard owns
+// the conn until the handshake returns. The claim is atomic in both directions: a
+// handshake that completes at the instant the context dies still wins and keeps its
+// conn, and a guard that fires first reports a dead conn rather than a result that
+// merely looks healthy.
+//
+// This is NOT the dial-context watchdog SPEC 077 removed. That one lived inside the
+// transport and kept listening after DialContext returned, which broke every pooled
+// consumer (the DNS pool cancels the dial context the moment dial returns, by the
+// net.Dialer contract). This guard is stopped before wrapEncryption returns, so it
+// cannot observe a cancellation that arrives after the dial — the contract of SPEC
+// 077 §2 holds unchanged.
+func guardHandshake(ctx context.Context, conn net.Conn) func() bool {
+	done := ctx.Done()
+	if done == nil {
+		return func() bool { return true }
+	}
+	var claimed atomic.Bool
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			if claimed.CompareAndSwap(false, true) {
+				common.Close(conn)
+			}
+		case <-finished:
+		}
+	}()
+	return func() bool {
+		won := claimed.CompareAndSwap(false, true)
+		close(finished)
+		return won
+	}
 }
 
 // encryptionPrefix is the only handshake method that exists today.
