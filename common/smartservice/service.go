@@ -494,27 +494,39 @@ func (s *Service) fetchASN(ctx context.Context) error {
 	default:
 		return E.New("unexpected status: ", response.Status)
 	}
-	content, err := io.ReadAll(io.LimitReader(response.Body, int64(maxASNDownloadBytes)+1))
-	if err != nil {
-		return err
+	temporaryPath := s.asnPath + ".tmp"
+	if err = filemanager.MkdirAll(s.ctx, filepath.Dir(s.asnPath), 0o755); err != nil {
+		return E.Cause(err, "create Smart ASN database directory")
 	}
-	if len(content) > maxASNDownloadBytes {
+	defer filemanager.RemoveAll(s.ctx, temporaryPath)
+	temporaryFile, err := os.OpenFile(temporaryPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return E.Cause(err, "create temporary Smart ASN database")
+	}
+	written, copyErr := io.Copy(temporaryFile, io.LimitReader(response.Body, int64(maxASNDownloadBytes)+1))
+	closeErr := temporaryFile.Close()
+	if copyErr != nil {
+		return E.Cause(copyErr, "download Smart ASN database")
+	}
+	if closeErr != nil {
+		return E.Cause(closeErr, "write temporary Smart ASN database")
+	}
+	if written > int64(maxASNDownloadBytes) {
 		return E.New("download exceeds maximum size")
 	}
-	if err = filemanager.MkdirAll(s.ctx, filepath.Dir(s.asnPath), 0o755); err == nil {
-		err = filemanager.WriteFile(s.ctx, s.asnPath+".tmp", content, 0o644)
-	}
-	if err == nil {
-		err = filemanager.Rename(s.ctx, s.asnPath+".tmp", s.asnPath)
-	} else {
-		_ = filemanager.RemoveAll(s.ctx, s.asnPath+".tmp")
-	}
+	candidate, err := maxminddb.Open(temporaryPath)
 	if err != nil {
+		return E.Cause(err, "validate downloaded Smart ASN database")
+	}
+	if err = candidate.Close(); err != nil {
+		return E.Cause(err, "close validated Smart ASN database")
+	}
+	if err = filemanager.Rename(s.ctx, temporaryPath, s.asnPath); err != nil {
 		return E.Cause(err, "publish Smart ASN database")
 	}
 	mmdb, err := maxminddb.Open(s.asnPath)
 	if err != nil {
-		return err
+		return E.Cause(err, "open published Smart ASN database")
 	}
 	s.asnReader.Store(mmdb)
 	if etag := response.Header.Get("Etag"); etag != "" {
