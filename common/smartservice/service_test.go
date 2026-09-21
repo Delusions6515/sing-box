@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/oschwald/maxminddb-golang"
 	"github.com/sagernet/sing-box/option"
 	"github.com/stretchr/testify/require"
 )
@@ -159,6 +160,31 @@ func TestUpdateASNDownloadsAndSwaps(t *testing.T) {
 	require.Empty(t, service.LookupASN(netip.MustParseAddr("1.0.0.1")))
 	require.Equal(t, int32(2), downloads.Load())
 	require.FileExists(t, service.asnPath)
+}
+
+func TestFetchASNRejectsInvalidDatabaseWithoutReplacingExisting(t *testing.T) {
+	valid := buildTestMMDB([]testASNNet{{prefix: netip.MustParsePrefix("1.0.0.0/24"), asn: 13335}})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("not a database"))
+	}))
+	t.Cleanup(server.Close)
+
+	path := filepath.Join(t.TempDir(), "GeoLite2-ASN.mmdb")
+	require.NoError(t, os.WriteFile(path, valid, 0o644))
+	service := &Service{
+		ctx:           context.Background(),
+		asnPath:       path,
+		asnURL:        server.URL,
+		asnHTTPClient: server.Client(),
+	}
+	require.NoError(t, service.loadASNMirror())
+
+	require.Error(t, service.fetchASN(context.Background()))
+	require.Equal(t, "AS13335", service.LookupASN(netip.MustParseAddr("1.0.0.1")))
+	reader, err := maxminddb.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	require.NoFileExists(t, path+".tmp")
 }
 
 func TestUpdateASNPreservesExistingOnHTTPError(t *testing.T) {
