@@ -72,6 +72,7 @@ func build() error {
 	if operatingSystem == "linux" {
 		tags = append(tags, "with_ebpf")
 	}
+	tags = append(tags, "with_xhttp")
 	arguments := []string{
 		"build",
 		"-v",
