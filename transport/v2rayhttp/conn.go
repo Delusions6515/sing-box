@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing-box/common/badh2"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
@@ -155,7 +156,7 @@ func NewLateHTTPConn(writer io.Writer, cancel context.CancelFunc) *HTTP2Conn {
 
 func (c *HTTP2Conn) Setup(reader io.Reader, err error) {
 	c.reader = reader
-	c.err = err
+	c.err = badh2.HideStreamError(err) // lx: SPEC 082
 	close(c.create)
 }
 
@@ -167,7 +168,7 @@ func (c *HTTP2Conn) Read(b []byte) (n int, err error) {
 		}
 	}
 	n, err = c.reader.Read(b)
-	return n, baderror.WrapH2(err)
+	return n, badh2.HideStreamError(baderror.WrapH2(err)) // lx: SPEC 082
 }
 
 func (c *HTTP2Conn) Write(b []byte) (n int, err error) {
