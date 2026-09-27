@@ -84,6 +84,9 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 		info.Put("now", now)
 		info.Put("all", group.All())
 	}
+	if group, isSmartGroup := detour.(adapter.SmartGroup); isSmartGroup {
+		info.Put("smart", group.SmartStatus())
+	}
 	return &info
 }
 

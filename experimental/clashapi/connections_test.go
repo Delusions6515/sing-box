@@ -7,7 +7,33 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
+	"github.com/stretchr/testify/require"
 )
+
+func TestConnectionObjectUsesSmartConnectionWinner(t *testing.T) {
+	winner := new(atomic.Pointer[adapter.Outbound])
+	connection := connectionObject(trafficcontrol.TrackerMetadata{
+		Metadata: adapter.InboundContext{SelectedOutbound: winner},
+		Chain:    []string{"smart", "Telegram"},
+		Upload:   new(atomic.Int64), Download: new(atomic.Int64),
+	})
+	var leaf adapter.Outbound = &connectionTestOutbound{tag: "actual-node"}
+	winner.Store(&leaf)
+	response, err := connection.MarshalJSON()
+	require.NoError(t, err)
+	var content struct {
+		Chains []string `json:"chains"`
+	}
+	require.NoError(t, json.Unmarshal(response, &content))
+	require.Equal(t, []string{"actual-node", "smart", "Telegram"}, content.Chains)
+}
+
+type connectionTestOutbound struct {
+	adapter.Outbound
+	tag string
+}
+
+func (o *connectionTestOutbound) Tag() string { return o.tag }
 
 func TestConnectionObjectPreferAndroidPackageName(t *testing.T) {
 	connection := connectionObject(trafficcontrol.TrackerMetadata{

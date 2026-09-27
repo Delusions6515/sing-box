@@ -395,11 +395,15 @@ func (m *Manager) connectionFromMetadata(metadata trafficcontrol.TrackerMetadata
 		DestinationPort: metadata.Metadata.Destination.Port,
 		Outbound:        metadata.Outbound,
 		OutboundType:    metadata.OutboundType,
-		Chain:           append([]string(nil), metadata.Chain...),
+		Chain:           append([]string(nil), metadata.DisplayChain()...),
 		StartedAt:       metadata.CreatedAt,
 		ClosedAt:        metadata.ClosedAt,
 		Upload:          metadata.Upload.Load(),
 		Download:        metadata.Download.Load(),
+	}
+	if winner := metadata.WinningOutbound(); winner != nil {
+		connection.Outbound = winner.Tag()
+		connection.OutboundType = winner.Type()
 	}
 	if m.exposeSensitive {
 		if metadata.Metadata.Source.Addr.IsValid() {

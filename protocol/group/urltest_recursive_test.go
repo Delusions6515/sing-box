@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -76,6 +77,27 @@ func TestURLTestDoesNotDeduplicateDifferentURLs(t *testing.T) {
 	require.EqualValues(t, 1, secondRequests.Load())
 }
 
+func TestURLTestGroupFailurePreservesManualDelay(t *testing.T) {
+	bad := &smartTestOutbound{tag: "bad", dial: func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, errors.New("probe failed")
+	}}
+	history := urltest.NewHistoryStorage()
+	history.StoreURLTestHistory(bad.Tag(), &adapter.URLTestHistory{Time: time.Now(), Delay: 42})
+	result := URLTestOutbounds(context.Background(), nil, history, log.NewNOPFactory().Logger(), []adapter.Outbound{bad}, "", time.Hour, true)
+	require.Empty(t, result)
+	manual := history.LoadURLTestHistory(bad.Tag())
+	require.NotNil(t, manual)
+	require.Equal(t, uint16(42), manual.Delay)
+	group := &URLTestGroup{outbounds: []adapter.Outbound{bad}, history: history}
+	_, available := group.Select(N.NetworkTCP)
+	require.False(t, available, "manual results must not count as URLTest health")
+	manager := &recursiveURLTestOutboundManager{outbounds: map[string]adapter.Outbound{bad.Tag(): bad}}
+	nested := newURLTestForRecursiveTest("nested", "", manager, history, bad)
+	manager.outbounds[nested.Tag()] = nested
+	result = URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{nested}, "", time.Hour, true)
+	require.NotContains(t, result, nested.Tag(), "manual results must not masquerade as a group test")
+}
+
 func TestURLTestSelectionKeepsCurrentWithinTolerance(t *testing.T) {
 	current := &recursiveURLTestOutbound{tag: "current"}
 	candidate := &recursiveURLTestOutbound{tag: "candidate"}
@@ -84,8 +106,8 @@ func TestURLTestSelectionKeepsCurrentWithinTolerance(t *testing.T) {
 		candidate.tag: candidate,
 	}}
 	history := urltest.NewHistoryStorage()
-	history.StoreURLTestHistory(current.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 100})
-	history.StoreURLTestHistory(candidate.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 60})
+	history.StoreGroupURLTestHistory(current.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 100})
+	history.StoreGroupURLTestHistory(candidate.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 60})
 	group := &URLTestGroup{
 		outbound:  manager,
 		outbounds: []adapter.Outbound{current, candidate},
@@ -98,7 +120,7 @@ func TestURLTestSelectionKeepsCurrentWithinTolerance(t *testing.T) {
 	require.True(t, available)
 	require.Same(t, current, selected)
 
-	history.StoreURLTestHistory(candidate.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 49})
+	history.StoreGroupURLTestHistory(candidate.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 49})
 	selected, available = group.Select(N.NetworkTCP)
 	require.True(t, available)
 	require.Same(t, candidate, selected)
@@ -112,8 +134,8 @@ func TestURLTestFallbackSelectsFirstAvailable(t *testing.T) {
 		second.tag: second,
 	}}
 	history := urltest.NewHistoryStorage()
-	history.StoreURLTestHistory(first.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 100})
-	history.StoreURLTestHistory(second.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 20})
+	history.StoreGroupURLTestHistory(first.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 100})
+	history.StoreGroupURLTestHistory(second.tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 20})
 	group := &URLTestGroup{
 		outbound:  manager,
 		outbounds: []adapter.Outbound{first, second},
