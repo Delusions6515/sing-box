@@ -19,14 +19,14 @@ func (resettingReader) Read([]byte) (int, error) {
 func TestGunConnHidesStreamError(t *testing.T) {
 	var target http2.StreamError
 
-	conn := newLateGunConn(io.Discard)
+	conn := newLateGunConn(io.Discard, func() {})
 	conn.setup(resettingReader{}, nil)
 	_, err := conn.Read(make([]byte, 16))
 	if err == nil || errors.As(err, &target) {
 		t.Fatalf("body read leaked StreamError: %v", err)
 	}
 
-	late := newLateGunConn(io.Discard)
+	late := newLateGunConn(io.Discard, func() {})
 	late.setup(nil, http2.StreamError{StreamID: 3, Code: http2.ErrCodeInternal})
 	_, err = late.Read(make([]byte, 16))
 	if err == nil || errors.As(err, &target) {
