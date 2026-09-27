@@ -9,6 +9,7 @@
   "server_port": 1080,
   "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
   "flow": "xtls-rprx-vision",
+  "encryption": "none",
   "network": "tcp",
   "tls": {},
   "packet_encoding": "",
@@ -46,6 +47,10 @@ VLESS Sub-protocol.
 Available values:
 
 * `xtls-rprx-vision`
+
+#### encryption
+
+Optional client-side VLESS encryption layer. Omit or set `"none"` to disable it. For a server configured with VLESS post-quantum encryption, use its public key in the form `mlkem768x25519plus.native.0rtt.<base64url-public-key>`; the appearance may also be `xorpub` or `random`, and the RTT mode may be `1rtt`. This layer is independent of TLS/REALITY. Only the outbound client is supported; VLESS inbound `decryption` is not implemented. Match the server's settings exactly.
 
 #### network
 
