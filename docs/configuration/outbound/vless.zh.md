@@ -9,6 +9,7 @@
   "server_port": 1080,
   "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
   "flow": "xtls-rprx-vision",
+  "encryption": "none",
   "network": "tcp",
   "tls": {},
   "packet_encoding": "",
@@ -46,6 +47,10 @@ VLESS 子协议。
 可用值：
 
 * `xtls-rprx-vision`
+
+#### encryption
+
+可选的 VLESS 出站加密层；不填写或设为 `"none"` 则关闭。连接启用了后量子加密的服务端时，使用其公钥，例如 `mlkem768x25519plus.native.0rtt.<base64url-公钥>`。外观还支持 `xorpub`、`random`，RTT 模式还支持 `1rtt`。它独立于 TLS/REALITY；目前仅支持出站客户端，不支持入站 `decryption`。配置须与服务端一致。
 
 #### network
 

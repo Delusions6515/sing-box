@@ -16835,6 +16835,9 @@
             "flow": {
               "type": "string"
             },
+            "encryption": {
+              "type": "string"
+            },
             "network": {
               "anyOf": [
                 {
@@ -21497,8 +21500,131 @@
             "type"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "xhttp"
+            },
+            "host": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "headers": {
+              "$ref": "#/$defs/HTTPHeader"
+            },
+            "x_padding_bytes": {
+              "type": "string"
+            },
+            "xmux": {
+              "$ref": "#/$defs/V2RayXHTTPXmuxOptions"
+            },
+            "no_grpc_header": {
+              "type": "boolean"
+            },
+            "session_placement": {
+              "type": "string"
+            },
+            "session_key": {
+              "type": "string"
+            },
+            "seq_placement": {
+              "type": "string"
+            },
+            "seq_key": {
+              "type": "string"
+            },
+            "session_table": {
+              "type": "string"
+            },
+            "session_length": {
+              "type": "string"
+            },
+            "uplink_data_placement": {
+              "type": "string"
+            },
+            "uplink_data_key": {
+              "type": "string"
+            },
+            "uplink_chunk_size": {
+              "type": "string"
+            },
+            "uplink_http_method": {
+              "type": "string"
+            },
+            "x_padding_obfs_mode": {
+              "type": "boolean"
+            },
+            "x_padding_key": {
+              "type": "string"
+            },
+            "x_padding_header": {
+              "type": "string"
+            },
+            "x_padding_placement": {
+              "type": "string"
+            },
+            "x_padding_method": {
+              "type": "string"
+            },
+            "sc_max_each_post_bytes": {
+              "type": "string"
+            },
+            "sc_min_posts_interval_ms": {
+              "type": "string"
+            },
+            "sc_max_concurrent_posts": {
+              "type": "integer"
+            },
+            "server_max_header_bytes": {
+              "type": "integer"
+            },
+            "no_sse_header": {
+              "type": "boolean"
+            },
+            "sc_max_buffered_posts": {
+              "type": "integer"
+            },
+            "sc_stream_up_server_secs": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
         }
       ]
+    },
+    "V2RayXHTTPXmuxOptions": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "$ref": "#/$defs/XmuxRange"
+        },
+        "max_connections": {
+          "$ref": "#/$defs/XmuxRange"
+        },
+        "c_max_reuse_times": {
+          "$ref": "#/$defs/XmuxRange"
+        },
+        "h_max_request_times": {
+          "$ref": "#/$defs/XmuxRange"
+        },
+        "h_max_reusable_secs": {
+          "$ref": "#/$defs/XmuxRange"
+        },
+        "h_keep_alive_period": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
     },
     "VLESSUser": {
       "type": "object",
@@ -21582,6 +21708,22 @@
         }
       },
       "additionalProperties": false
+    },
+    "XmuxRange": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      ]
     }
   }
 }

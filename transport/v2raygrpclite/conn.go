@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sagernet/sing-box/common/badh2"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
 	"github.com/sagernet/sing/common/buf"
@@ -55,13 +56,13 @@ func (c *GunConn) setup(reader io.Reader, err error) {
 		c.rawReader = reader
 		c.reader = std_bufio.NewReader(reader)
 	}
-	c.err = err
+	c.err = badh2.HideStreamError(err) // lx: SPEC 082
 	close(c.create)
 }
 
 func (c *GunConn) Read(b []byte) (n int, err error) {
 	n, err = c.read(b)
-	return n, baderror.WrapH2(err)
+	return n, badh2.HideStreamError(baderror.WrapH2(err)) // lx: SPEC 082
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
