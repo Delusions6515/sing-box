@@ -69,6 +69,13 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 	if ownerUserID != "" && ownerUserID != identity.UserID {
 		return nil, status.Error(codes.PermissionDenied, "the service is owned by another user")
 	}
+	activeInstance := s.daemon.startedService.Instance()
+	if activeInstance != nil {
+		err = s.daemon.startedService.CheckConfig(ctx, request.ConfigContent)
+		if err != nil {
+			return nil, err
+		}
+	}
 	err = s.daemon.preparePlatformOwnerLocked(identity)
 	if err != nil {
 		return nil, err
@@ -91,6 +98,13 @@ func (s *desktopService) StartService(ctx context.Context, request *StartService
 	}
 	err = s.daemon.startServiceLocked(ctx, identity.UserID, request.ConfigContent, mergedOptions)
 	if err != nil {
+		if activeInstance != nil && s.daemon.startedService.Instance() == activeInstance {
+			if s.daemon.platform != nil {
+				s.daemon.platform.SetSystemProxyPreference(currentOptions.systemProxyEnabled())
+				err = E.Errors(err, s.daemon.preparePlatformOwnerLocked(identity))
+			}
+			return nil, err
+		}
 		return nil, s.daemon.cleanFailedStartLocked(identity.UserID, mergedOptions, err)
 	}
 	directory := userWorkingDirectory(identity.UserID)
