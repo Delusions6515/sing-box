@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/common/hash"
+	"github.com/sagernet/sing-box/common/smart"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/varbin"
 )
@@ -193,4 +194,37 @@ type URLTestGroup interface {
 type LoadBalanceGroup interface {
 	ConnectionOutboundGroup
 	URLTest(ctx context.Context) (map[string]uint16, error)
+}
+
+type SelectorGroup interface {
+	Selected() Outbound
+}
+
+type SmartGroup interface {
+	OutboundGroup
+	SmartStatus() SmartGroupStatus
+	Weights() []smart.NodeRankItem
+	ClearCache() error
+}
+
+type SmartGroupStatus struct {
+	Selected   string                 `json:"selected"`
+	UpdatedAt  *time.Time             `json:"updated_at"`
+	Candidates []SmartCandidateStatus `json:"candidates"`
+}
+
+type SmartCandidateStatus struct {
+	Tag     string  `json:"tag"`
+	Weight  float64 `json:"weight"`
+	Samples int64   `json:"samples"`
+	Blocked bool    `json:"blocked"`
+}
+
+func OutboundTag(detour Outbound) string {
+	if group, hasNow := detour.(interface{ Now() string }); hasNow {
+		if now := group.Now(); now != "" {
+			return now
+		}
+	}
+	return detour.Tag()
 }

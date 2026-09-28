@@ -143,6 +143,11 @@ func (c *Connections) ApplyEvents(events *ConnectionEvents) {
 			}
 		case ConnectionEventUpdate:
 			if conn, ok := c.connectionMap[event.ID]; ok {
+				if event.Connection != nil {
+					conn.Outbound = event.Connection.Outbound
+					conn.OutboundType = event.Connection.OutboundType
+					conn.chainList = append([]string(nil), event.Connection.chainList...)
+				}
 				conn.Uplink = event.UplinkDelta
 				conn.Downlink = event.DownlinkDelta
 				conn.UplinkTotal += event.UplinkDelta

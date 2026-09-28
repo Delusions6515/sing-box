@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/common/tlsspoof"
@@ -59,6 +60,8 @@ type InboundContext struct {
 	RouteRule     string
 	RouteOutbound string
 	OutboundChain []Outbound
+	// SelectedOutbound shares the successful per-connection leaf with traffic trackers.
+	SelectedOutbound *atomic.Pointer[Outbound]
 
 	// sniffer
 
