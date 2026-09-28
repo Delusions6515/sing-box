@@ -16,6 +16,7 @@ Available transports:
 * QUIC
 * gRPC
 * HTTPUpgrade
+* [XHTTP](v2ray-xhttp.md) (client only, requires the `with_xhttp` build tag)
 
 !!! warning "Difference from v2ray-core"
 
