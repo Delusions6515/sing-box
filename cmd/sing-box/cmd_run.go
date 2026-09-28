@@ -6,14 +6,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	runtimeDebug "runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/configscript"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -47,6 +50,18 @@ type OptionsEntry struct {
 }
 
 func readConfigAt(path string) (*OptionsEntry, error) {
+	optionsEntry, err := readConfigRawAt(path)
+	if err != nil {
+		return nil, err
+	}
+	optionsEntry.options, err = parseCLIConfig(optionsEntry.content)
+	if err != nil {
+		return nil, E.Cause(err, "decode config at ", path)
+	}
+	return optionsEntry, nil
+}
+
+func readConfigRawAt(path string) (*OptionsEntry, error) {
 	var (
 		configContent []byte
 		err           error
@@ -59,21 +74,31 @@ func readConfigAt(path string) (*OptionsEntry, error) {
 	if err != nil {
 		return nil, E.Cause(err, "read config at ", path)
 	}
-	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
-	if err != nil {
-		return nil, E.Cause(err, "decode config at ", path)
-	}
-	return &OptionsEntry{
-		content: configContent,
-		path:    path,
-		options: options,
-	}, nil
+	return &OptionsEntry{content: configContent, path: path}, nil
 }
 
-func readConfig() ([]*OptionsEntry, error) {
+func parseCLIConfig(configContent []byte) (option.Options, error) {
+	sourceContent := configContent
+	generatedContent, hasScripts, err := configscript.Generate(globalCtx, configContent, configscript.Host{
+		OS: runtime.GOOS, Arch: runtime.GOARCH, Client: "cli",
+	})
+	if err != nil {
+		return option.Options{}, err
+	}
+	if hasScripts {
+		configContent = generatedContent
+	}
+	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
+	if err != nil && hasScripts {
+		err = configscript.WrapGeneratedConfigError(sourceContent, err)
+	}
+	return options, err
+}
+
+func readConfigRaw() ([]*OptionsEntry, error) {
 	var optionsList []*OptionsEntry
 	for _, path := range configPaths {
-		optionsEntry, err := readConfigAt(path)
+		optionsEntry, err := readConfigRawAt(path)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +113,7 @@ func readConfig() ([]*OptionsEntry, error) {
 			if !strings.HasSuffix(entry.Name(), ".json") || entry.IsDir() {
 				continue
 			}
-			optionsEntry, err := readConfigAt(filepath.Join(directory, entry.Name()))
+			optionsEntry, err := readConfigRawAt(filepath.Join(directory, entry.Name()))
 			if err != nil {
 				return nil, err
 			}
@@ -98,6 +123,20 @@ func readConfig() ([]*OptionsEntry, error) {
 	sort.Slice(optionsList, func(i, j int) bool {
 		return optionsList[i].path < optionsList[j].path
 	})
+	return optionsList, nil
+}
+
+func readConfig() ([]*OptionsEntry, error) {
+	optionsList, err := readConfigRaw()
+	if err != nil {
+		return nil, err
+	}
+	for _, optionsEntry := range optionsList {
+		optionsEntry.options, err = parseCLIConfig(optionsEntry.content)
+		if err != nil {
+			return nil, E.Cause(err, "decode config at ", optionsEntry.path)
+		}
+	}
 	return optionsList, nil
 }
 
@@ -131,6 +170,21 @@ func mergeOptionsList(optionsList []*OptionsEntry) (option.Options, error) {
 	return mergedOptions, nil
 }
 
+func wrapCLIConfigSources(optionsList []*OptionsEntry, err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, optionsEntry := range optionsList {
+		hasScripts, inspectErr := configscript.HasScripts(optionsEntry.content)
+		if inspectErr != nil || !hasScripts {
+			continue
+		}
+		err = configscript.WrapGeneratedConfigError(optionsEntry.content, err)
+		err = E.Cause(err, "config at ", optionsEntry.path)
+	}
+	return err
+}
+
 // configCheckerFunc exposes check to the Clash API, which reloads through the
 // same path as SIGHUP.
 type configCheckerFunc func() error
@@ -139,7 +193,7 @@ func (f configCheckerFunc) CheckConfig() error {
 	return f()
 }
 
-func create(options option.Options) (*box.Box, context.CancelFunc, error) {
+func create(options option.Options, checkConfig func() error, optionsList []*OptionsEntry) (*box.Box, context.CancelFunc, error) {
 	if disableColor {
 		if options.Log == nil {
 			options.Log = &option.LogOptions{}
@@ -147,7 +201,10 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 		options.Log.DisableColor = true
 	}
 	ctx, cancel := context.WithCancel(service.ExtendContext(globalCtx))
-	service.MustRegister[adapter.ConfigChecker](ctx, configCheckerFunc(check))
+	service.MustRegister[configscript.Host](ctx, configscript.Host{
+		OS: runtime.GOOS, Arch: runtime.GOARCH, Client: "cli",
+	})
+	service.MustRegister[adapter.ConfigChecker](ctx, configCheckerFunc(checkConfig))
 	instance, err := box.New(box.Options{
 		Context:                    ctx,
 		Options:                    options,
@@ -155,7 +212,7 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 	})
 	if err != nil {
 		cancel()
-		return nil, nil, E.Cause(err, "create service")
+		return nil, nil, E.Cause(wrapCLIConfigSources(optionsList, err), "create service")
 	}
 
 	osSignals := make(chan os.Signal, 1)
@@ -176,7 +233,7 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 	finishStart()
 	if err != nil {
 		cancel()
-		return nil, nil, E.Cause(err, "start service")
+		return nil, nil, E.Cause(wrapCLIConfigSources(optionsList, err), "start service")
 	}
 	return instance, cancel, nil
 }
@@ -194,34 +251,73 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var (
+		reloadCandidateLock    sync.Mutex
+		reloadCandidate        option.Options
+		reloadCandidateSources []*OptionsEntry
+		reloadCandidateSet     bool
+	)
+	checkAndStoreCandidate := func() error {
+		candidate, sources, err := readConfigAndCheck()
+		if err != nil {
+			return err
+		}
+		reloadCandidateLock.Lock()
+		reloadCandidate = candidate
+		reloadCandidateSources = sources
+		reloadCandidateSet = true
+		reloadCandidateLock.Unlock()
+		return nil
+	}
+	takeCandidate := func() (option.Options, []*OptionsEntry, bool) {
+		reloadCandidateLock.Lock()
+		defer reloadCandidateLock.Unlock()
+		if !reloadCandidateSet {
+			return option.Options{}, nil, false
+		}
+		candidate := reloadCandidate
+		sources := reloadCandidateSources
+		reloadCandidate = option.Options{}
+		reloadCandidateSources = nil
+		reloadCandidateSet = false
+		return candidate, sources, true
+	}
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(osSignals)
 	for {
-		instance, cancel, createErr := create(options)
+		instance, cancel, createErr := create(options, checkAndStoreCandidate, optionsList)
 		if createErr != nil {
 			return createErr
 		}
 		runtimeDebug.FreeOSMemory()
 		for {
 			reloadTag := false
+			var (
+				nextOptions option.Options
+				nextSources []*OptionsEntry
+			)
 			select {
 			case osSignal := <-osSignals:
 				if osSignal == syscall.SIGHUP {
-					err = check()
+					nextOptions, nextSources, err = readConfigAndCheck()
+					if err != nil {
+						log.Error(E.Cause(err, "reload service"))
+						continue
+					}
+					takeCandidate()
+					reloadTag = true
+				}
+			case <-instance.ReloadChan():
+				nextOptions, nextSources, reloadTag = takeCandidate()
+				if !reloadTag {
+					nextOptions, nextSources, err = readConfigAndCheck()
 					if err != nil {
 						log.Error(E.Cause(err, "reload service"))
 						continue
 					}
 					reloadTag = true
 				}
-			case <-instance.ReloadChan():
-				err = check()
-				if err != nil {
-					log.Error(E.Cause(err, "reload service"))
-					continue
-				}
-				reloadTag = true
 			}
 			cancel()
 			closeCtx, closed := context.WithCancel(context.Background())
@@ -234,11 +330,9 @@ func run() error {
 				}
 				return nil
 			}
+			options = nextOptions
+			optionsList = nextSources
 			break
-		}
-		options, err = readConfigAndMerge()
-		if err != nil {
-			return err
 		}
 	}
 }
