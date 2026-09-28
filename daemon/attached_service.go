@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"time"
+
+	"github.com/sagernet/sing-box/common/configscript"
+	"github.com/sagernet/sing/service"
 )
 
 const defaultAttachedLogMaxLines = 3000
@@ -11,8 +14,9 @@ const defaultAttachedLogMaxLines = 3000
 func NewAttachedService(ctx context.Context) *StartedService {
 	instance := attachInstance(ctx)
 	s := NewStartedService(ServiceOptions{
-		Context:     ctx,
-		LogMaxLines: defaultAttachedLogMaxLines,
+		Context:          ctx,
+		ConfigScriptHost: service.FromContext[configscript.Host](ctx),
+		LogMaxLines:      defaultAttachedLogMaxLines,
 	})
 	s.instance = instance
 	s.serviceStatus = &ServiceStatus{Status: ServiceStatus_STARTED}

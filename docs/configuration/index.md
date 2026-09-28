@@ -60,3 +60,7 @@ sing-box format -w -c config.json -D config_directory
 ```bash
 sing-box merge output.json -c config.json -D config_directory
 ```
+
+## Starlark in JSON comments
+
+Core paths integrated in this repository can transform attached JSON values with marked `@starlark` block comments. See the [Starlark configuration guide](./starlark.md) for syntax, target identities, CLI workflows, validation and reload behavior, limits, and examples.
