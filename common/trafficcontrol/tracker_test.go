@@ -1,6 +1,7 @@
 package trafficcontrol
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -8,6 +9,29 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestSmartChainUsesEachConnectionWinner(t *testing.T) {
+	first := new(atomic.Pointer[adapter.Outbound])
+	second := new(atomic.Pointer[adapter.Outbound])
+	chain := []string{"smart", "Telegram"}
+	one := TrackerMetadata{Chain: chain, Outbound: "smart", Metadata: adapter.InboundContext{SelectedOutbound: first}}
+	two := TrackerMetadata{Chain: chain, Outbound: "smart", Metadata: adapter.InboundContext{SelectedOutbound: second}}
+	require.Equal(t, chain, one.DisplayChain())
+	var nodeA adapter.Outbound = &trackerTestOutbound{tag: "node-a"}
+	var nodeB adapter.Outbound = &trackerTestOutbound{tag: "node-b"}
+	first.Store(&nodeA)
+	second.Store(&nodeB)
+	require.Equal(t, []string{"node-a", "smart", "Telegram"}, one.DisplayChain())
+	require.Equal(t, []string{"node-b", "smart", "Telegram"}, two.DisplayChain())
+	require.Equal(t, chain, one.Chain)
+}
+
+type trackerTestOutbound struct {
+	adapter.Outbound
+	tag string
+}
+
+func (o *trackerTestOutbound) Tag() string { return o.tag }
 
 func TestTrackerMetadataConnectionDomain(t *testing.T) {
 	testCases := []struct {
