@@ -4,8 +4,10 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -55,9 +57,12 @@ type InboundContext struct {
 
 	// power report
 
+	SmartRule     smart.RuleTarget
 	RouteRule     string
 	RouteOutbound string
 	OutboundChain []Outbound
+	// SelectedOutbound shares the successful per-connection leaf with traffic trackers.
+	SelectedOutbound *atomic.Pointer[Outbound]
 
 	// sniffer
 
