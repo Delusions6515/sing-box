@@ -31,6 +31,7 @@ type ReferenceManager struct {
 	devicePaused           atomic.Bool
 	keepIdle               map[any]bool
 	unreferencedTransports map[string]bool
+	memberCallbacks        []func()
 }
 
 func NewReferenceManager(ctx context.Context, logger log.ContextLogger, options option.Options) *ReferenceManager {
@@ -110,6 +111,12 @@ func (m *ReferenceManager) Start(stage adapter.StartStage) error {
 	if m.pauseManager != nil {
 		m.devicePaused.Store(m.pauseManager.IsDevicePaused())
 	}
+	outboundManager := service.FromContext[adapter.OutboundManager](m.ctx)
+	for _, outbound := range outboundManager.Outbounds() {
+		if updates, ok := outbound.(adapter.OutboundGroupUpdates); ok {
+			m.memberCallbacks = append(m.memberCallbacks, updates.RegisterMemberUpdateCallback(func() { m.subscriber.Emit(struct{}{}) }))
+		}
+	}
 	m.update()
 	go m.loop()
 	if m.pauseManager != nil {
@@ -129,6 +136,10 @@ func (m *ReferenceManager) Start(stage adapter.StartStage) error {
 }
 
 func (m *ReferenceManager) Close() error {
+	for _, unregister := range m.memberCallbacks {
+		unregister()
+	}
+	m.memberCallbacks = nil
 	if m.pauseCallback != nil {
 		m.pauseManager.UnregisterCallback(m.pauseCallback)
 		m.pauseCallback = nil
