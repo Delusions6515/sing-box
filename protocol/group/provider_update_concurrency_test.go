@@ -75,6 +75,19 @@ func TestProviderGroupConcurrentUpdates(t *testing.T) {
 		require.Equal(t, expectedTags, urlTest.All())
 	})
 
+	t.Run("Smart", func(t *testing.T) {
+		group := newSmartTestGroup()
+		group.outbound = outboundManager
+		group.providers = providers
+		group.providerTags = providerTags
+		group.outboundsCache = make(map[string][]adapter.Outbound)
+		runConcurrentProviderUpdates(t, group.onProviderUpdated, func() {
+			_ = group.All()
+			_ = group.References()
+		})
+		require.Equal(t, expectedTags, group.All())
+	})
+
 	t.Run("LoadBalance", func(t *testing.T) {
 		group := new(LoadBalanceGroup)
 		group.storeOutbounds([]adapter.Outbound{firstOutbound, secondOutbound})

@@ -2,8 +2,10 @@ package rule
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -48,6 +50,17 @@ var _ adapter.Rule = (*DefaultRule)(nil)
 
 type DefaultRule struct {
 	abstractDefaultRule
+	smartTarget smart.RuleTarget
+}
+
+func (r *DefaultRule) SmartTarget() smart.RuleTarget {
+	target := r.smartTarget
+	if target.Claimable && r.ruleSetItem != nil {
+		for _, set := range r.ruleSetItem.setList {
+			target.Count += set.RuleCount()
+		}
+	}
+	return target
 }
 
 type RuleItem interface {
@@ -62,7 +75,7 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
 	}
 	id, _ := uuid.NewV4()
 	rule := &DefaultRule{
-		abstractDefaultRule{
+		abstractDefaultRule: abstractDefaultRule{
 			domainMatchStrategy: C.DomainMatchStrategy(options.DomainMatchStrategy),
 			abstractRule: abstractRule{
 				uuid:    id.String(),
@@ -317,6 +330,23 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
 		item := NewRuleSetItem(router, options.RuleSet, matchSource, false)
 		rule.ruleSetItem = item
 		rule.allItems = append(rule.allItems, item)
+	}
+	if !rule.invert && !options.RuleSetIPCIDRMatchSource && !options.Deprecated_RulesetIPCIDRMatchSource && len(rule.destinationIPCIDRItems) == 0 {
+		// Destination address items are OR alternatives, including IP items
+		// and the address group merged from a rule set. A narrow identity is
+		// safe only when no alternative can satisfy that group instead.
+		switch {
+		case len(options.RuleSet) == 1 && len(rule.destinationAddressItems) == 0:
+			name := options.RuleSet[0]
+			rule.smartTarget = smart.RuleTarget{Key: "rule-set:" + name, Broad: smart.BroadRuleSet(name), Claimable: true}
+		case rule.ruleSetItem == nil && len(rule.destinationAddressItems) == 1:
+			switch {
+			case len(options.DomainSuffix) == 1 && len(options.Domain) == 0:
+				rule.smartTarget.Key = "domain-suffix:" + strings.ToLower(strings.Trim(options.DomainSuffix[0], "."))
+			case len(options.Domain) == 1 && len(options.DomainSuffix) == 0:
+				rule.smartTarget.Key = "domain:" + strings.ToLower(strings.TrimSuffix(options.Domain[0], "."))
+			}
+		}
 	}
 	return rule, nil
 }

@@ -39,6 +39,7 @@
 | `dns`          | [DNS](./dns/)                   |
 | `selector`     | [Selector](./selector/)         |
 | `urltest`      | [URLTest](./urltest/)           |
+| `smart`        | [Smart](./smart/)               |
 | `naive`        | [NaiveProxy](./naive/)          |
 | `loadbalance`  | [LoadBalance](./loadbalance/)   |
 

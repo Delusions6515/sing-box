@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/oschwald/maxminddb-golang"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/smart"
 	"github.com/sagernet/sing-box/log"
@@ -25,6 +24,8 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/filemanager"
+
+	"github.com/oschwald/maxminddb-golang"
 	"github.com/vernesong/leaves"
 )
 
