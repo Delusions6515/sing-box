@@ -52,6 +52,7 @@ const (
 
 type LoadBalance struct {
 	outbound.Adapter
+	memberUpdates
 	ctx                 context.Context
 	outbound            adapter.OutboundManager
 	logger              log.ContextLogger
@@ -305,6 +306,7 @@ func (s *LoadBalance) onProviderUpdated(tag string) error {
 	s.outboundsCache = outboundsCache
 	s.group.storeOutbounds(outbounds)
 	s.providerAccess.Unlock()
+	s.notifyMembersUpdated()
 	if s.group.history != nil {
 		s.group.history.NotifyUpdated()
 	}
