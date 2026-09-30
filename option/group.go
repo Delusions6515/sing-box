@@ -1,6 +1,11 @@
 package option
 
-import "github.com/sagernet/sing/common/json/badoption"
+import (
+	"reflect"
+
+	"github.com/sagernet/sing-box/schema"
+	"github.com/sagernet/sing/common/json/badoption"
+)
 
 type SelectorOutboundOptions struct {
 	GroupCommonOption
@@ -39,3 +44,35 @@ type LoadBalanceOutboundOptions struct {
 	TTL         badoption.Duration `json:"ttl,omitempty"`
 	Strategy    string             `json:"strategy,omitempty"`
 }
+
+type SmartOutboundOptions struct {
+	GroupCommonOption
+	URL            string             `json:"url,omitempty"`
+	Interval       badoption.Duration `json:"interval,omitempty"`
+	Timeout        badoption.Duration `json:"timeout,omitempty"`
+	Tolerance      uint16             `json:"tolerance,omitempty"`
+	MaxFailedTimes int                `json:"max_failed_times,omitempty"`
+	PolicyPriority string             `json:"policy_priority,omitempty"`
+	UseLightGBM    bool               `json:"use_lightgbm,omitempty"`
+	CollectData    bool               `json:"collect_data,omitempty"`
+	SampleRate     float64            `json:"sample_rate,omitempty"`
+	PreferASN      bool               `json:"prefer_asn,omitempty"`
+	DisableUDP     bool               `json:"disable_udp,omitempty"`
+	ExpectedStatus string             `json:"expected_status,omitempty"`
+}
+
+func (SmartOutboundOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	node := schema.StrictObject()
+	if err := builder.FlattenStruct(node, reflect.TypeFor[SmartOutboundOptions]()); err != nil {
+		return nil, err
+	}
+	node.Properties.Put("max_failed_times", schema.UnsignedNode(64))
+	minimum, maximum := int64(0), uint64(1)
+	node.Properties.Put("sample_rate", &schema.Node{Type: "number", Minimum: &minimum, Maximum: &maximum})
+	for _, name := range []string{"interval", "timeout"} {
+		node.Properties.Put(name, &schema.Node{Type: "string", Pattern: smartNonNegativeDurationPattern})
+	}
+	return node, nil
+}
+
+const smartNonNegativeDurationPattern = `^\+?(((\d+(\.\d*)?|\.\d+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h|d))+|0)$`
