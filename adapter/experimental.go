@@ -184,13 +184,36 @@ type PreMatchOutboundGroup interface {
 	SelectPreMatchOutbound(metadata *InboundContext, selectOutbound func(Outbound) (Outbound, PreMatchAction)) (Outbound, PreMatchAction)
 }
 
-type URLTestGroup interface {
+// OutboundGroupUpdates reports membership changes after the new members are published.
+// Unregistering prevents future notifications; an already dispatched callback may finish.
+type OutboundGroupUpdates interface {
+	RegisterMemberUpdateCallback(callback func()) (unregister func())
+}
+
+type URLTestableGroup interface {
 	OutboundGroup
 	URLTest(ctx context.Context) (map[string]uint16, error)
+}
+
+type URLTestGroup interface {
+	URLTestableGroup
 	PerformUpdateCheck()
 }
 
 type LoadBalanceGroup interface {
 	ConnectionOutboundGroup
-	URLTest(ctx context.Context) (map[string]uint16, error)
+	URLTestableGroup
+}
+
+type SelectorGroup interface {
+	Selected() Outbound
+}
+
+func OutboundTag(detour Outbound) string {
+	if group, hasNow := detour.(interface{ Now() string }); hasNow {
+		if now := group.Now(); now != "" {
+			return now
+		}
+	}
+	return detour.Tag()
 }

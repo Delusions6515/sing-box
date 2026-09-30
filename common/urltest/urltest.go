@@ -38,13 +38,17 @@ func UnifiedDelayFromContext(ctx context.Context) bool {
 
 type HistoryStorage struct {
 	access       sync.RWMutex
-	delayHistory map[string]*adapter.URLTestHistory
+	delayHistory map[string]*adapter.URLTestHistory // manual and direct tests
+	groupHistory map[string]*adapter.URLTestHistory
+	smartHistory map[string]*adapter.URLTestHistory
 	updateHooks  []*observable.Subscriber[struct{}]
 }
 
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
 		delayHistory: make(map[string]*adapter.URLTestHistory),
+		groupHistory: make(map[string]*adapter.URLTestHistory),
+		smartHistory: make(map[string]*adapter.URLTestHistory),
 	}
 }
 
@@ -66,19 +70,58 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	return s.delayHistory[tag]
+	latest := s.delayHistory[tag]
+	for _, entry := range []*adapter.URLTestHistory{s.groupHistory[tag], s.smartHistory[tag]} {
+		if entry != nil && (latest == nil || entry.Time.After(latest.Time)) {
+			latest = entry
+		}
+	}
+	return latest
+}
+
+func (s *HistoryStorage) LoadGroupURLTestHistory(tag string) *adapter.URLTestHistory {
+	if s == nil {
+		return nil
+	}
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.groupHistory[tag]
 }
 
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
+	s.deleteHistory(s.delayHistory, tag)
+}
+
+func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
+	s.storeHistory(s.delayHistory, tag, history)
+}
+
+func (s *HistoryStorage) DeleteGroupURLTestHistory(tag string) {
+	s.deleteHistory(s.groupHistory, tag)
+}
+
+func (s *HistoryStorage) StoreGroupURLTestHistory(tag string, history *adapter.URLTestHistory) {
+	s.storeHistory(s.groupHistory, tag, history)
+}
+
+func (s *HistoryStorage) DeleteSmartURLTestHistory(tag string) {
+	s.deleteHistory(s.smartHistory, tag)
+}
+
+func (s *HistoryStorage) StoreSmartURLTestHistory(tag string, history *adapter.URLTestHistory) {
+	s.storeHistory(s.smartHistory, tag, history)
+}
+
+func (s *HistoryStorage) deleteHistory(entries map[string]*adapter.URLTestHistory, tag string) {
 	s.access.Lock()
-	delete(s.delayHistory, tag)
+	delete(entries, tag)
 	s.notifyUpdated()
 	s.access.Unlock()
 }
 
-func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
+func (s *HistoryStorage) storeHistory(entries map[string]*adapter.URLTestHistory, tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
-	s.delayHistory[tag] = history
+	entries[tag] = history
 	s.notifyUpdated()
 	s.access.Unlock()
 }

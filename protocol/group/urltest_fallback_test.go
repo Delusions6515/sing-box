@@ -18,8 +18,8 @@ func TestFallbackChoosesFastestWhenAllExceedThreshold(t *testing.T) {
 	slow := &preMatchTestOutbound{tag: "slow"}
 	fast := &preMatchTestOutbound{tag: "fast"}
 	history := urltest.NewHistoryStorage()
-	history.StoreURLTestHistory(slow.Tag(), &adapter.URLTestHistory{Delay: 500})
-	history.StoreURLTestHistory(fast.Tag(), &adapter.URLTestHistory{Delay: 200})
+	history.StoreGroupURLTestHistory(slow.Tag(), &adapter.URLTestHistory{Delay: 500})
+	history.StoreGroupURLTestHistory(fast.Tag(), &adapter.URLTestHistory{Delay: 200})
 	group := &URLTestGroup{
 		outbounds: []adapter.Outbound{slow, fast}, history: history,
 		fallback: URLTestFallback{enabled: true, maxDelay: 100},
@@ -41,8 +41,8 @@ func TestFallbackLongMaximumDelayDoesNotWrap(t *testing.T) {
 	first := &preMatchTestOutbound{tag: "first"}
 	second := &preMatchTestOutbound{tag: "second"}
 	history := urltest.NewHistoryStorage()
-	history.StoreURLTestHistory(first.Tag(), &adapter.URLTestHistory{Delay: 5000})
-	history.StoreURLTestHistory(second.Tag(), &adapter.URLTestHistory{Delay: 2000})
+	history.StoreGroupURLTestHistory(first.Tag(), &adapter.URLTestHistory{Delay: 5000})
+	history.StoreGroupURLTestHistory(second.Tag(), &adapter.URLTestHistory{Delay: 2000})
 	group := &URLTestGroup{
 		outbounds: []adapter.Outbound{first, second}, history: history,
 		fallback: instance.(*URLTest).fallback,
