@@ -188,7 +188,7 @@ func (m *Manager) Close() error {
 			done()
 		}
 	}
-	return nil
+	return err
 }
 
 func (m *Manager) Outbounds() []adapter.Outbound {

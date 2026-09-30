@@ -34,6 +34,7 @@ var (
 
 type Selector struct {
 	outbound.Adapter
+	memberUpdates
 	ctx                          context.Context
 	outbound                     adapter.OutboundManager
 	logger                       logger.ContextLogger
@@ -266,6 +267,7 @@ func (s *Selector) onProviderUpdated(tag string) error {
 	previous := s.selected.Swap(detour)
 	s.stateAccess.Unlock()
 	s.providerAccess.Unlock()
+	s.notifyMembersUpdated()
 	if previous != detour {
 		s.interruptGroup.Interrupt(s.interruptExternalConnections)
 		if s.history != nil {
