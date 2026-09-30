@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,29 @@ type snapshotOutbound struct {
 
 func (o *snapshotOutbound) Tag() string  { return o.tag }
 func (o *snapshotOutbound) Type() string { return o.kind }
+
+func TestSmartWinnerInActiveAndRecentConnections(t *testing.T) {
+	manager := newTestManager(t, true)
+	outer := &snapshotOutbound{tag: "Telegram", kind: "selector"}
+	smart := &snapshotOutbound{tag: "smart", kind: "smart"}
+	winner := new(atomic.Pointer[adapter.Outbound])
+	metadata := adapter.InboundContext{Network: "udp", OutboundChain: []adapter.Outbound{outer, smart}, SelectedOutbound: winner}
+	flow := manager.traffic.RoutedFlow(context.Background(), metadata, nil, outer)
+	flow.AttachFlow(nil)
+	leaf := &snapshotOutbound{tag: "actual-node", kind: "vless"}
+	var outbound adapter.Outbound = leaf
+	winner.Store(&outbound)
+	active := manager.traffic.Connections()
+	require.Len(t, active, 1)
+	connection := manager.connectionFromMetadata(*active[0])
+	require.Equal(t, []string{"actual-node", "smart", "Telegram"}, connection.Chain)
+	require.Equal(t, "actual-node", connection.Outbound)
+	require.Equal(t, "vless", connection.OutboundType)
+	flow.CloseFlow(0)
+	closed := manager.traffic.ClosedConnections()
+	require.Len(t, closed, 1)
+	require.Equal(t, connection.Chain, manager.connectionFromMetadata(*closed[0]).Chain)
+}
 
 func TestResolvedChainTrafficAttribution(t *testing.T) {
 	manager := newTestManager(t, true)
