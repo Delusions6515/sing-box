@@ -6,6 +6,8 @@ import (
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/configoptions"
+	"github.com/sagernet/sing-box/common/configscript"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
@@ -44,7 +46,7 @@ func (s *StartedService) CheckConfig(ctx context.Context, configContent string) 
 	selectedLocale := locale.FromContext(ctx)
 	ctx, _ = locale.ContextWithLocale(s.ctx, selectedLocale.Locale)
 	ctx = service.ExtendContext(ctx)
-	options, err := parseConfig(ctx, configContent)
+	options, err := configoptions.Parse(ctx, []byte(configContent), s.configScriptHost)
 	if err != nil {
 		return err
 	}
@@ -56,14 +58,22 @@ func (s *StartedService) CheckConfig(ctx context.Context, configContent string) 
 	})
 	if err == nil {
 		instance.Close()
+		return nil
 	}
-	return err
+	return configscript.WrapGeneratedConfigError([]byte(configContent), err)
 }
 
 func (s *StartedService) FormatConfig(ctx context.Context, configContent string) (string, error) {
+	hasScripts, err := configscript.HasScripts([]byte(configContent))
+	if err != nil {
+		return "", err
+	}
+	if hasScripts {
+		return "", E.New("refusing to format configuration with Starlark scripts")
+	}
 	selectedLocale := locale.FromContext(ctx)
 	ctx, _ = locale.ContextWithLocale(s.ctx, selectedLocale.Locale)
-	options, err := parseConfig(ctx, configContent)
+	options, err := configoptions.Parse(ctx, []byte(configContent), s.configScriptHost)
 	if err != nil {
 		return "", err
 	}
@@ -87,9 +97,10 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 	selectedLocale := locale.FromContext(ctx)
 	ctx, _ = locale.ContextWithLocale(s.ctx, selectedLocale.Locale)
 	ctx = service.ExtendContext(ctx)
+	service.MustRegister[configscript.Host](ctx, s.configScriptHost)
 	service.MustRegister[deprecated.Manager](ctx, new(deprecatedManager))
 	ctx, cancel := context.WithCancel(ctx)
-	options, err := parseConfig(ctx, profileContent)
+	options, err := configoptions.Parse(ctx, []byte(profileContent), s.configScriptHost)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -133,7 +144,7 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 	})
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, configscript.WrapGeneratedConfigError([]byte(profileContent), err)
 	}
 	i.instance = boxInstance
 	i.connectionManager = service.FromContext[adapter.ConnectionManager](ctx)
@@ -210,12 +221,4 @@ func (i *Instance) PauseManager() pause.Manager {
 
 func (i *Instance) TrafficManager() *trafficcontrol.Manager {
 	return i.trafficManager
-}
-
-func parseConfig(ctx context.Context, configContent string) (option.Options, error) {
-	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(configContent))
-	if err != nil {
-		return option.Options{}, E.Cause(err, "decode config")
-	}
-	return options, nil
 }
