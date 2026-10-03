@@ -60,3 +60,7 @@ sing-box format -w -c config.json -D config_directory
 ```bash
 sing-box merge output.json -c config.json -D config_directory
 ```
+
+## 注释中的 Starlark
+
+本仓库中已接入功能的核心路径可以使用带 `@starlark` 标记的块注释变换其附着的 JSON 值。语法、目标身份、CLI 工作流、校验与重载行为、限制和示例详见 [Starlark 配置指南](./starlark.zh.md)。
