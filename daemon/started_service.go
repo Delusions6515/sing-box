@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/configscript"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/networkquality"
 	"github.com/sagernet/sing-box/common/stun"
@@ -44,7 +45,8 @@ const (
 var _ StartedServiceServer = (*StartedService)(nil)
 
 type StartedService struct {
-	ctx context.Context
+	ctx              context.Context
+	configScriptHost configscript.Host
 	// platform adapter.PlatformInterface
 	handler           PlatformHandler
 	debug             bool
@@ -78,7 +80,8 @@ type StartedService struct {
 }
 
 type ServiceOptions struct {
-	Context context.Context
+	Context          context.Context
+	ConfigScriptHost configscript.Host
 	// Platform           adapter.PlatformInterface
 	Handler           PlatformHandler
 	Debug             bool
@@ -95,7 +98,8 @@ type ServiceOptions struct {
 
 func NewStartedService(options ServiceOptions) *StartedService {
 	s := &StartedService{
-		ctx: options.Context,
+		ctx:              options.Context,
+		configScriptHost: options.ConfigScriptHost,
 		// platform:                options.Platform,
 		handler:           options.Handler,
 		debug:             options.Debug,
@@ -257,31 +261,43 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 		return os.ErrClosed
 	}
 	oldInstance := s.instance
+	if oldInstance == nil {
+		s.startInterrupted = false
+		s.updateStatus(ServiceStatus_STARTING)
+		s.resetLogs()
+	}
+	s.serviceAccess.Unlock()
+
 	if oldInstance != nil {
-		s.instance = nil
-		s.updateStatus(ServiceStatus_STOPPING)
-		s.serviceAccess.Unlock()
 		oomRecorder := service.FromContext[*oomkiller.Recorder](s.ctx)
 		if oomRecorder != nil {
 			oomRecorder.BeginReload()
 			defer oomRecorder.EndReload()
 		}
-		_ = oldInstance.Close()
-		runtimeDebug.FreeOSMemory()
-		s.serviceAccess.Lock()
 	}
-	s.startInterrupted = false
-	s.updateStatus(ServiceStatus_STARTING)
-	if oldInstance == nil {
-		s.resetLogs()
-	}
-	s.serviceAccess.Unlock()
 	instance, err := s.newInstance(ctx, profileContent, options, oldInstance != nil)
 	if err != nil {
 		s.serviceAccess.Lock()
-		s.updateStatusError(err)
+		if oldInstance == nil {
+			s.updateStatusError(err)
+		}
 		s.serviceAccess.Unlock()
+		if oldInstance != nil {
+			s.WriteMessage(log.LevelError, err.Error())
+		}
 		return err
+	}
+	if oldInstance != nil {
+		s.serviceAccess.Lock()
+		s.instance = nil
+		s.updateStatus(ServiceStatus_STOPPING)
+		s.serviceAccess.Unlock()
+		_ = oldInstance.Close()
+		runtimeDebug.FreeOSMemory()
+		s.serviceAccess.Lock()
+		s.startInterrupted = false
+		s.updateStatus(ServiceStatus_STARTING)
+		s.serviceAccess.Unlock()
 	}
 	instance.urlTestHistoryStorage.AddUpdateHook(s.urlTestSubscriber)
 	if instance.clashMode != nil {
@@ -301,6 +317,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 		return nil
 	}
 	if err != nil {
+		err = configscript.WrapGeneratedConfigError([]byte(profileContent), err)
 		s.instance = nil
 		s.updateStatusError(err)
 		s.serviceAccess.Unlock()

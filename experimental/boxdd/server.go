@@ -6,10 +6,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/configscript"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -43,6 +45,14 @@ type Daemon struct {
 	platform                daemonPlatform
 }
 
+func currentDesktopConfigScriptHost() configscript.Host {
+	return configscript.Host{
+		OS:     runtime.GOOS,
+		Arch:   runtime.GOARCH,
+		Client: "desktop",
+	}
+}
+
 func newDaemon() (*Daemon, error) {
 	restoreLocale()
 	ctx := include.Context(context.Background())
@@ -61,8 +71,9 @@ func newDaemon() (*Daemon, error) {
 	}
 	registerSecurityPolicy(ctx, d)
 	d.startedService = daemon.NewStartedService(daemon.ServiceOptions{
-		Context:     ctx,
-		LogMaxLines: 3000,
+		Context:          ctx,
+		ConfigScriptHost: currentDesktopConfigScriptHost(),
+		LogMaxLines:      3000,
 	})
 	d.oomRecorder = oomkiller.NewRecorder(libbox.OOMRecorderOptions(d.startedService))
 	service.MustRegister[*oomkiller.Recorder](ctx, d.oomRecorder)
