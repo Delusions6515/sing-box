@@ -5,6 +5,7 @@ import (
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/service"
 
 	"github.com/spf13/cobra"
@@ -27,9 +28,18 @@ func init() {
 }
 
 func check() error {
-	options, err := readConfigAndMerge()
+	_, _, err := readConfigAndCheck()
+	return err
+}
+
+func readConfigAndCheck() (option.Options, []*OptionsEntry, error) {
+	optionsList, err := readConfig()
 	if err != nil {
-		return err
+		return option.Options{}, nil, err
+	}
+	options, err := mergeOptionsList(optionsList)
+	if err != nil {
+		return option.Options{}, optionsList, wrapCLIConfigSources(optionsList, err)
 	}
 	ctx, cancel := context.WithCancel(service.ExtendContext(globalCtx))
 	instance, err := box.New(box.Options{
@@ -38,7 +48,9 @@ func check() error {
 	})
 	if err == nil {
 		instance.Close()
+	} else {
+		err = wrapCLIConfigSources(optionsList, err)
 	}
 	cancel()
-	return err
+	return options, optionsList, err
 }

@@ -6,11 +6,15 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/configoptions"
+	"github.com/sagernet/sing-box/common/configscript"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/constant/goos"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
@@ -37,20 +41,14 @@ func baseContext(platformInterface PlatformInterface) context.Context {
 	}
 	ctx := context.Background()
 	ctx = filemanager.WithDefault(ctx, sWorkingPath, sTempPath, sUserID, sGroupID)
-	return box.Context(ctx, include.InboundRegistry(), include.ProviderRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
-}
-
-func parseConfig(ctx context.Context, configContent string) (option.Options, error) {
-	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(configContent))
-	if err != nil {
-		return option.Options{}, E.Cause(err, "decode config")
-	}
-	return options, nil
+	ctx = box.Context(ctx, include.InboundRegistry(), include.ProviderRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
+	service.MustRegister[configscript.Host](ctx, currentLibboxConfigScriptHost())
+	return ctx
 }
 
 func CheckConfig(configContent string) error {
 	ctx := baseContext(nil)
-	options, err := parseConfig(ctx, configContent)
+	options, err := configoptions.Parse(ctx, []byte(configContent), currentLibboxConfigScriptHost())
 	if err != nil {
 		return err
 	}
@@ -63,8 +61,9 @@ func CheckConfig(configContent string) error {
 	})
 	if err == nil {
 		instance.Close()
+		return nil
 	}
-	return err
+	return configscript.WrapGeneratedConfigError([]byte(configContent), err)
 }
 
 type platformInterfaceStub struct{}
@@ -265,7 +264,14 @@ func GenerateConfigSchema() (*StringBox, error) {
 }
 
 func FormatConfig(configContent string) (*StringBox, error) {
-	options, err := parseConfig(baseContext(nil), configContent)
+	hasScripts, err := configscript.HasScripts([]byte(configContent))
+	if err != nil {
+		return nil, err
+	}
+	if hasScripts {
+		return nil, E.New("refusing to format configuration with Starlark scripts")
+	}
+	options, err := configoptions.Parse(baseContext(nil), []byte(configContent), currentLibboxConfigScriptHost())
 	if err != nil {
 		return nil, err
 	}
@@ -280,11 +286,38 @@ func FormatConfig(configContent string) (*StringBox, error) {
 }
 
 func HasTunInbound(configContent string) (bool, error) {
-	options, err := parseConfig(baseContext(nil), configContent)
+	options, err := configoptions.Parse(baseContext(nil), []byte(configContent), currentLibboxConfigScriptHost())
 	if err != nil {
 		return false, err
 	}
 	return slices.ContainsFunc(options.Inbounds, func(inbound option.Inbound) bool {
 		return inbound.Type == C.TypeTun
 	}), nil
+}
+
+func currentLibboxConfigScriptHost() configscript.Host {
+	os := goos.GOOS
+	if C.IsTvOS {
+		os = "tvos"
+	}
+	return configscript.Host{
+		OS:     os,
+		Arch:   runtime.GOARCH,
+		Client: libboxClientForTarget(C.IsAndroid, C.IsIos, C.IsTvOS, C.IsDarwin),
+	}
+}
+
+func libboxClientForTarget(android, ios, tvos, darwin bool) string {
+	switch {
+	case android:
+		return "sfa"
+	case tvos:
+		return "sft"
+	case ios:
+		return "sfi"
+	case darwin:
+		return "sfm"
+	default:
+		return "libbox"
+	}
 }
