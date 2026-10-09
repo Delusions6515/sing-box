@@ -69,7 +69,8 @@ func NewCommandServer(handler CommandServerHandler, platformInterface PlatformIn
 		powerManager:      powerManager,
 	}
 	server.StartedService = daemon.NewStartedService(daemon.ServiceOptions{
-		Context: ctx,
+		Context:          ctx,
+		ConfigScriptHost: currentLibboxConfigScriptHost(),
 		// Platform:         platformWrapper,
 		Handler:           (*platformHandler)(server),
 		Debug:             sDebug,
