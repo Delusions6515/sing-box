@@ -231,6 +231,7 @@ type VmessOption struct {
 	HTTP2Opts           HTTP2Options `yaml:"h2-opts,omitempty"`
 	GrpcOpts            GrpcOptions  `yaml:"grpc-opts,omitempty"`
 	WSOpts              WSOptions    `yaml:"ws-opts,omitempty"`
+	XHTTPOpts           XHTTPOptions `yaml:"xhttp-opts,omitempty"`
 	PacketAddr          bool         `yaml:"packet-addr,omitempty"`
 	XUDP                bool         `yaml:"xudp,omitempty"`
 	PacketEncoding      string       `yaml:"packet-encoding,omitempty"`
@@ -253,6 +254,7 @@ func (v *VmessOption) Build() any {
 			security = "chacha20-poly1305"
 		}
 	}
+	xhttp := clashXHTTP{options: v.XHTTPOpts, server: v.Server, port: v.Port, serverName: v.ServerName, tls: v.TLSOptions}
 	switch v.PacketEncoding {
 	case "":
 		if v.XUDP {
@@ -275,7 +277,7 @@ func (v *VmessOption) Build() any {
 		OutboundTLSOptionsContainer: clashTLSOptions(v.Server, v.TLSOptions),
 		PacketEncoding:              v.PacketEncoding,
 		Multiplex:                   v.MuxOpts.Build(),
-		Transport:                   clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts),
+		Transport:                   clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts, xhttp),
 	}
 }
 
@@ -285,6 +287,7 @@ type VlessOption struct {
 	*TLSOptions    `yaml:",inline"`
 	UUID           string       `yaml:"uuid"`
 	Flow           string       `yaml:"flow,omitempty"`
+	Encryption     string       `yaml:"encryption,omitempty"`
 	UDP            bool         `yaml:"udp,omitempty"`
 	PacketAddr     bool         `yaml:"packet-addr,omitempty"`
 	XUDP           bool         `yaml:"xudp,omitempty"`
@@ -295,6 +298,7 @@ type VlessOption struct {
 	HTTP2Opts      HTTP2Options `yaml:"h2-opts,omitempty"`
 	GrpcOpts       GrpcOptions  `yaml:"grpc-opts,omitempty"`
 	WSOpts         WSOptions    `yaml:"ws-opts,omitempty"`
+	XHTTPOpts      XHTTPOptions `yaml:"xhttp-opts,omitempty"`
 	MuxOpts        *MuxOptions  `yaml:"smux,omitempty"`
 }
 
@@ -302,6 +306,7 @@ func (v *VlessOption) Build() any {
 	if v.TLSOptions != nil {
 		v.SNI = v.ServerName
 	}
+	xhttp := clashXHTTP{options: v.XHTTPOpts, server: v.Server, port: v.Port, serverName: v.ServerName, tls: v.TLSOptions}
 	switch v.PacketEncoding {
 	case "":
 		if v.PacketAddr {
@@ -312,15 +317,19 @@ func (v *VlessOption) Build() any {
 	case "packet":
 		v.PacketEncoding = "packetaddr"
 	}
+	if v.Encryption == "none" {
+		v.Encryption = ""
+	}
 	return &option.VLESSOutboundOptions{
 		DialerOptions:               v.DialerOptions.Build(),
 		ServerOptions:               v.ServerOptions.Build(),
 		UUID:                        v.UUID,
 		Flow:                        v.Flow,
+		Encryption:                  v.Encryption,
 		Network:                     clashNetworks(v.UDP),
 		OutboundTLSOptionsContainer: clashTLSOptions(v.Server, v.TLSOptions),
 		Multiplex:                   v.MuxOpts.Build(),
-		Transport:                   clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts),
+		Transport:                   clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts, xhttp),
 		PacketEncoding:              &v.PacketEncoding,
 	}
 }
@@ -367,16 +376,18 @@ type TrojanOption struct {
 	DialerOptions `yaml:",inline"`
 	ServerOptions `yaml:",inline"`
 	TLSOptions    `yaml:",inline"`
-	Password      string      `yaml:"password"`
-	UDP           bool        `yaml:"udp,omitempty"`
-	Network       string      `yaml:"network,omitempty"`
-	GrpcOpts      GrpcOptions `yaml:"grpc-opts,omitempty"`
-	WSOpts        WSOptions   `yaml:"ws-opts,omitempty"`
-	MuxOpts       *MuxOptions `yaml:"smux,omitempty"`
+	Password      string       `yaml:"password"`
+	UDP           bool         `yaml:"udp,omitempty"`
+	Network       string       `yaml:"network,omitempty"`
+	GrpcOpts      GrpcOptions  `yaml:"grpc-opts,omitempty"`
+	WSOpts        WSOptions    `yaml:"ws-opts,omitempty"`
+	XHTTPOpts     XHTTPOptions `yaml:"xhttp-opts,omitempty"`
+	MuxOpts       *MuxOptions  `yaml:"smux,omitempty"`
 }
 
 func (t *TrojanOption) Build() any {
 	t.TLS = true
+	xhttp := clashXHTTP{options: t.XHTTPOpts, server: t.Server, port: t.Port, serverName: t.SNI, tls: &t.TLSOptions}
 	return &option.TrojanOutboundOptions{
 		DialerOptions:               t.DialerOptions.Build(),
 		ServerOptions:               t.ServerOptions.Build(),
@@ -384,7 +395,7 @@ func (t *TrojanOption) Build() any {
 		Network:                     clashNetworks(t.UDP),
 		OutboundTLSOptionsContainer: clashTLSOptions(t.Server, &t.TLSOptions),
 		Multiplex:                   t.MuxOpts.Build(),
-		Transport:                   clashTransport(t.Network, HTTPOptions{}, HTTP2Options{}, t.GrpcOpts, t.WSOpts),
+		Transport:                   clashTransport(t.Network, HTTPOptions{}, HTTP2Options{}, t.GrpcOpts, t.WSOpts, xhttp),
 	}
 }
 
@@ -1003,8 +1014,10 @@ func clashSpeedToNetworkBytes(speed string) *byteformats.NetworkBytesCompat {
 	return networkBytes
 }
 
-func clashTransport(network string, httpOpts HTTPOptions, h2Opts HTTP2Options, grpcOpts GrpcOptions, wsOpts WSOptions) *option.V2RayTransportOptions {
+func clashTransport(network string, httpOpts HTTPOptions, h2Opts HTTP2Options, grpcOpts GrpcOptions, wsOpts WSOptions, xhttp clashXHTTP) *option.V2RayTransportOptions {
 	switch network {
+	case "xhttp":
+		return xhttp.build()
 	case "http":
 		return &option.V2RayTransportOptions{
 			Type: C.V2RayTransportTypeHTTP,
