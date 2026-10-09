@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"github.com/sagernet/sing-box/common/smart"
 	C "github.com/sagernet/sing-box/constant"
 
 	"github.com/miekg/dns"
@@ -20,6 +21,11 @@ type Rule interface {
 	ChangeStatus()
 	Type() string
 	Action() RuleAction
+}
+
+// SmartRuleTarget exposes routing identity without parsing display strings.
+type SmartRuleTarget interface {
+	SmartTarget() smart.RuleTarget
 }
 
 type DNSRule interface {

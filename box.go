@@ -16,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/httpclient"
 	"github.com/sagernet/sing-box/common/netns"
+	"github.com/sagernet/sing-box/common/smartservice"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -59,6 +60,7 @@ type Box struct {
 	router              *route.Router
 	referenceManager    *route.ReferenceManager
 	httpClientService   adapter.LifecycleService
+	smartService        *smartservice.Service
 	internalService     []adapter.LifecycleService
 	ntpService          *ntp.Service
 	scope               *adapter.Scope
@@ -264,6 +266,13 @@ func New(options Options) (*Box, error) {
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
 	service.MustRegister[adapter.HTTPClientManager](ctx, httpClientManager)
 	httpClientService := adapter.LifecycleService(httpClientManager)
+	var smartService *smartservice.Service
+	if experimentalOptions.Smart != nil || common.Any(options.Outbounds, func(outbound option.Outbound) bool {
+		return outbound.Type == C.TypeSmart
+	}) {
+		smartService = smartservice.NewService(ctx, logFactory.NewLogger("smart"), common.PtrValueOrDefault(experimentalOptions.Smart))
+		service.MustRegister[*smartservice.Service](ctx, smartService)
+	}
 	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions, reloadChan)
 	service.MustRegister[adapter.Router](ctx, router)
 	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
@@ -546,6 +555,7 @@ func New(options Options) (*Box, error) {
 		router:              router,
 		referenceManager:    referenceManager,
 		httpClientService:   httpClientService,
+		smartService:        smartService,
 		createdAt:           createdAt,
 		debugOptions:        debugOptions,
 		logFactory:          logFactory,
@@ -648,6 +658,17 @@ func (s *Box) preStart() error {
 		boxComponent{"dns-transport", s.dnsTransport},
 		boxComponent{"network", s.network},
 		boxComponent{"connection", s.connection},
+	)
+	if err != nil {
+		return err
+	}
+	if s.smartService != nil {
+		err = s.scope.Start(s.smartService.Name(), s.smartService, adapter.StartStateStart)
+		if err != nil {
+			return err
+		}
+	}
+	err = s.startComponents(adapter.StartStateStart,
 		boxComponent{s.httpClientService.Name(), s.httpClientService},
 		boxComponent{"provider", s.provider},
 		boxComponent{"router", s.router},

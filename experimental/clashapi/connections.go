@@ -106,7 +106,7 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		"upload":      c.Upload.Load(),
 		"download":    c.Download.Load(),
 		"start":       c.CreatedAt,
-		"chains":      c.Chain,
+		"chains":      trafficcontrol.TrackerMetadata(c).DisplayChain(),
 		"rule":        rule,
 		"rulePayload": "",
 	})

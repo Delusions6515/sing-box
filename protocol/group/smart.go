@@ -1,0 +1,1107 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"io"
+	"math/rand/v2"
+	"net"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/common/interrupt"
+	"github.com/sagernet/sing-box/common/smart"
+	"github.com/sagernet/sing-box/common/smartservice"
+	"github.com/sagernet/sing-box/common/urltest"
+	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/batch"
+	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/x/list"
+	"github.com/sagernet/sing/service"
+	"github.com/sagernet/sing/service/filemanager"
+)
+
+const (
+	defaultSmartURL               = "https://www.gstatic.com/generate_204"
+	defaultSmartInterval          = 5 * time.Minute
+	defaultSmartTimeout           = 5 * time.Second
+	defaultSmartMaxSelected       = 10
+	defaultSmartMaxFailedTimes    = 5
+	defaultSmartHistoryRetention  = 7 * 24 * time.Hour
+	defaultSmartMaxHistoryEntries = 50000
+	smartFlushInterval            = 5 * time.Minute
+	smartGCInterval               = 2 * time.Hour
+	smartRecoveryInterval         = 10 * time.Minute
+	smartResponseRecoveryInterval = 15 * time.Minute
+	smartPrefetchInterval         = 15 * time.Minute
+)
+
+func RegisterSmart(registry *outbound.Registry) {
+	outbound.Register[option.SmartOutboundOptions](registry, C.TypeSmart, NewSmart)
+}
+
+var (
+	_ adapter.SmartGroup = (*Smart)(nil)
+	_ adapter.Referrer   = (*Smart)(nil)
+	_ adapter.Lifecycle  = (*Smart)(nil)
+)
+
+type Smart struct {
+	outbound.Adapter
+	memberUpdates
+	ctx        context.Context
+	outbound   adapter.OutboundManager
+	connection adapter.ConnectionManager
+	logger     log.ContextLogger
+	history    *urltest.HistoryStorage
+
+	tags            []string
+	provider        adapter.ProviderManager
+	providers       map[string]adapter.Provider
+	providerHandles map[string]*list.Element[adapter.ProviderUpdateCallback]
+	providerTags    []string
+	outboundsCache  map[string][]adapter.Outbound
+	exclude         *regexp.Regexp
+	include         *regexp.Regexp
+	useAllProviders bool
+	providerAccess  sync.Mutex
+
+	candidateAccess  sync.RWMutex
+	candidates       []adapter.Outbound
+	candidateDirty   atomic.Bool
+	candidateUpdates chan struct{}
+	memberCallbacks  map[adapter.Outbound]func()
+
+	selection           smartSelection
+	targetPolicy        *smart.TargetPolicy
+	store               *smart.Store
+	smartService        *smartservice.Service
+	policyPriority      smart.PriorityRuleList
+	useLightGBM         bool
+	collectData         bool
+	sampleRate          float64
+	preferASN           bool
+	disableUDP          bool
+	expectedStatus      smart.StatusRanges
+	url                 string
+	interval            time.Duration
+	timeout             time.Duration
+	tolerance           uint16
+	maxSelected         int
+	historyPath         string
+	historyPoolKey      string
+	historyRetention    time.Duration
+	maxHistoryEntries   int
+	historyEntry        *smartHistoryEntry
+	activeAccess        sync.Mutex
+	activeConnections   map[io.Closer]smart.MetricKey
+	externalConnections *interrupt.Group
+
+	statusAccess sync.RWMutex
+	status       adapter.SmartGroupStatus
+
+	responseAccess   sync.Mutex
+	responseCtx      context.Context
+	responseCancel   context.CancelFunc
+	responseEpoch    uint64
+	responseThrottle *smart.ProbeThrottle
+	responseBlocks   map[smartResponseKey]smartResponseBlock
+	responseTargets  map[string]string
+	responseWorkers  sync.WaitGroup
+	exitWatcher      atomic.Pointer[smart.ExitWatcher]
+
+	probeAccess sync.Mutex
+	probing     bool
+	closed      atomic.Bool
+	cancel      context.CancelFunc
+	worker      sync.WaitGroup
+}
+
+func NewSmart(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, options option.SmartOutboundOptions) (adapter.Outbound, error) {
+	if options.Interval < 0 || options.Timeout < 0 || options.MaxFailedTimes < 0 || options.SampleRate < 0 || options.SampleRate > 1 {
+		return nil, E.New("invalid smart option")
+	}
+	parsedPolicyPriority, err := smart.ParsePriorityRules(options.PolicyPriority)
+	if err != nil {
+		return nil, err
+	}
+	policyPriority := smart.PriorityRuleList(parsedPolicyPriority)
+	expectedStatus, err := smart.ParseStatusRanges(options.ExpectedStatus)
+	if err != nil {
+		return nil, err
+	}
+	interval := time.Duration(options.Interval)
+	if interval == 0 {
+		interval = defaultSmartInterval
+	}
+	timeout := time.Duration(options.Timeout)
+	if timeout == 0 {
+		timeout = defaultSmartTimeout
+	}
+	maxFailedTimes := options.MaxFailedTimes
+	if maxFailedTimes == 0 {
+		maxFailedTimes = defaultSmartMaxFailedTimes
+	}
+	historyPath := "smart-history.json"
+	url := options.URL
+	if url == "" {
+		url = defaultSmartURL
+	}
+	sampleRate := options.SampleRate
+	if sampleRate == 0 {
+		sampleRate = 1
+	}
+	networks := []string{N.NetworkTCP}
+	if !options.DisableUDP {
+		networks = append(networks, N.NetworkUDP)
+	}
+	storeConfig := smart.Config{
+		MinSamples:     smart.DefaultMinSamples,
+		MaxFailedTimes: maxFailedTimes,
+		BlockDuration:  interval,
+		MaxEntries:     defaultSmartMaxHistoryEntries,
+		WeightFactor:   policyPriority.Factor,
+	}
+	smartService := service.FromContext[*smartservice.Service](ctx)
+	if options.UseLightGBM && smartService != nil {
+		smartService.EnableModel()
+		storeConfig.Predict = smartService.Predict
+	}
+	result := &Smart{
+		Adapter:             outbound.NewAdapter(C.TypeSmart, tag, networks, options.Outbounds),
+		ctx:                 ctx,
+		outbound:            service.FromContext[adapter.OutboundManager](ctx),
+		connection:          service.FromContext[adapter.ConnectionManager](ctx),
+		logger:              logger,
+		history:             service.PtrFromContext[urltest.HistoryStorage](ctx),
+		tags:                slices.Clone(options.Outbounds),
+		provider:            service.FromContext[adapter.ProviderManager](ctx),
+		providers:           make(map[string]adapter.Provider),
+		providerHandles:     make(map[string]*list.Element[adapter.ProviderUpdateCallback]),
+		providerTags:        slices.Clone(options.Providers),
+		outboundsCache:      make(map[string][]adapter.Outbound),
+		exclude:             (*regexp.Regexp)(options.Exclude),
+		include:             (*regexp.Regexp)(options.Include),
+		useAllProviders:     options.UseAllProviders,
+		targetPolicy:        smart.NewTargetPolicy(),
+		store:               smart.NewStore(storeConfig),
+		smartService:        smartService,
+		policyPriority:      policyPriority,
+		useLightGBM:         options.UseLightGBM,
+		collectData:         options.CollectData,
+		sampleRate:          sampleRate,
+		preferASN:           options.PreferASN,
+		disableUDP:          options.DisableUDP,
+		expectedStatus:      expectedStatus,
+		url:                 url,
+		interval:            interval,
+		timeout:             timeout,
+		tolerance:           options.Tolerance,
+		maxSelected:         defaultSmartMaxSelected,
+		historyPath:         historyPath,
+		historyPoolKey:      filepath.Clean(filemanager.BasePath(ctx, historyPath)),
+		historyRetention:    defaultSmartHistoryRetention,
+		maxHistoryEntries:   defaultSmartMaxHistoryEntries,
+		externalConnections: interrupt.NewGroup(),
+	}
+	result.initResponseProbes()
+	return result, nil
+}
+
+func (s *Smart) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	switch stage {
+	case adapter.StartStateInitialize:
+		scope.Add(s.Close)
+	case adapter.StartStateStart:
+		return s.start()
+	case adapter.StartStatePostStart:
+		ctx, cancel := context.WithCancel(scope.Context())
+		s.cancel = cancel
+		s.worker.Add(1)
+		go s.loop(ctx)
+	}
+	return nil
+}
+
+func (s *Smart) start() error {
+	if s.outbound == nil {
+		return E.New("missing outbound manager")
+	}
+	if len(s.tags)+len(s.providerTags) == 0 && !s.useAllProviders {
+		return E.New("missing outbound and provider tags")
+	}
+	if s.provider != nil {
+		if s.useAllProviders {
+			for _, provider := range s.provider.Providers() {
+				tag := provider.Tag()
+				s.providerTags = append(s.providerTags, tag)
+				s.providers[tag] = provider
+				s.providerHandles[tag] = provider.RegisterCallback(s.onProviderUpdated)
+			}
+		} else {
+			for index, tag := range s.providerTags {
+				provider, loaded := s.provider.Get(tag)
+				if !loaded {
+					return E.New("outbound provider ", index, " not found: ", tag)
+				}
+				s.providers[tag] = provider
+				s.providerHandles[tag] = provider.RegisterCallback(s.onProviderUpdated)
+			}
+		}
+	}
+	if err := s.rebuildCandidates(""); err != nil {
+		return err
+	}
+	if err := s.loadHistory(); err != nil {
+		s.warnSmartHistory("read smart history: ", err)
+	}
+	return nil
+}
+
+func (s *Smart) Close() error {
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.responseAccess.Lock()
+	if s.responseCancel != nil {
+		s.responseCancel()
+	}
+	s.responseAccess.Unlock()
+	s.worker.Wait()
+	s.responseWorkers.Wait()
+	s.unregisterProviderCallbacks()
+	closeErr := s.closeActiveConnections()
+	if s.externalConnections != nil {
+		s.externalConnections.Interrupt(true)
+	}
+	flushErr := s.flushHistory(true)
+	s.releaseHistory()
+	return errors.Join(closeErr, flushErr)
+}
+
+func (s *Smart) loop(ctx context.Context) {
+	defer s.worker.Done()
+	s.runProbe(ctx)
+	probeTicker := time.NewTicker(s.interval)
+	flushTicker := time.NewTicker(smartFlushInterval)
+	gcTicker := time.NewTicker(smartGCInterval)
+	recoveryTicker := time.NewTicker(smartRecoveryInterval)
+	responseRecoveryTicker := time.NewTicker(smartResponseRecoveryInterval)
+	prefetchTicker := time.NewTicker(smartPrefetchInterval)
+	defer probeTicker.Stop()
+	defer flushTicker.Stop()
+	defer gcTicker.Stop()
+	defer recoveryTicker.Stop()
+	defer responseRecoveryTicker.Stop()
+	defer prefetchTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.candidateUpdates:
+			if s.candidateDirty.Swap(false) {
+				if err := s.rebuildCandidates(""); err != nil {
+					s.candidateDirty.Store(true)
+					s.logger.Warn("refresh Smart candidates: ", err)
+				}
+			}
+		case <-probeTicker.C:
+			s.runProbe(ctx)
+		case <-flushTicker.C:
+			if err := s.flushHistory(false); err != nil {
+				s.errorSmartHistory("write smart history: ", err)
+			}
+		case <-gcTicker.C:
+			s.store.GC(time.Now(), s.historyRetention, s.maxHistoryEntries)
+		case <-recoveryTicker.C:
+			s.store.Recover(time.Now())
+		case <-responseRecoveryTicker.C:
+			s.recheckResponses()
+		case <-prefetchTicker.C:
+			s.store.Prefetch(time.Now(), s.Tag())
+		}
+	}
+}
+
+func (s *Smart) Now() string {
+	s.statusAccess.RLock()
+	defer s.statusAccess.RUnlock()
+	return s.status.Selected
+}
+
+func (s *Smart) All() []string {
+	return common.Map(s.candidateSnapshot(), func(candidate adapter.Outbound) string {
+		return candidate.Tag()
+	})
+}
+
+func (s *Smart) Selected(network string) adapter.Outbound {
+	selected := s.Now()
+	for _, candidate := range s.candidateSnapshot() {
+		if candidate.Tag() == selected && common.Contains(candidate.Network(), network) {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func (s *Smart) AttachConnection(closer io.Closer) func() {
+	return s.externalConnections.Add(closer, true)
+}
+
+func (s *Smart) Weights() []smart.NodeRankItem {
+	return s.store.GroupWeights(time.Now(), s.Tag(), common.Map(s.candidateSnapshot(), func(candidate adapter.Outbound) string {
+		return candidate.Tag()
+	}))
+}
+
+// ClearCache drops all learned metrics and their persisted history so the
+// group relearns from scratch.
+func (s *Smart) ClearCache() error {
+	s.responseAccess.Lock()
+	s.store.Clear()
+	s.responseEpoch++
+	if s.responseCancel != nil {
+		s.responseCancel()
+		s.responseCtx, s.responseCancel = context.WithCancel(s.ctx)
+		s.responseThrottle = new(smart.ProbeThrottle)
+		clear(s.responseBlocks)
+		clear(s.responseTargets)
+		s.resetExitWatcherLocked()
+	}
+	s.responseAccess.Unlock()
+	s.selection.clear()
+	if s.targetPolicy != nil {
+		s.targetPolicy.Clear()
+	}
+	return s.flushHistory(true)
+}
+
+func (s *Smart) SmartStatus() adapter.SmartGroupStatus {
+	s.statusAccess.RLock()
+	defer s.statusAccess.RUnlock()
+	status := s.status
+	if status.UpdatedAt != nil {
+		updated := *status.UpdatedAt
+		status.UpdatedAt = &updated
+	}
+	status.Candidates = append([]adapter.SmartCandidateStatus{}, status.Candidates...)
+	return status
+}
+
+func (s *Smart) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	s.connection.NewConnection(ctx, s, conn, metadata, onClose)
+}
+
+func (s *Smart) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
+}
+
+func (s *Smart) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	transport := N.NetworkName(network)
+	if transport != N.NetworkTCP && transport != N.NetworkUDP {
+		return nil, E.Extend(N.ErrUnknownNetwork, network)
+	}
+	ordered, target := s.rank(ctx, transport, destination)
+	if len(ordered) == 0 {
+		return nil, E.New("smart group has no supported candidate")
+	}
+	conn, winner, elapsed, err := dialSmartConnection(s, ctx, transport, target, ordered, func(ctx context.Context, candidate smartCandidate) (net.Conn, error) {
+		return candidate.outbound.DialContext(ctx, network, destination)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.wrapConn(ctx, conn, winner, target, transport, destination, elapsed), nil
+}
+
+func (s *Smart) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	if s.disableUDP {
+		return nil, E.New("smart group has UDP disabled")
+	}
+	ordered, target := s.rank(ctx, N.NetworkUDP, destination)
+	if len(ordered) == 0 {
+		return nil, E.New("smart group has no supported UDP candidate")
+	}
+	conn, winner, elapsed, err := dialSmartConnection(s, ctx, N.NetworkUDP, target, ordered, func(ctx context.Context, candidate smartCandidate) (net.PacketConn, error) {
+		return candidate.outbound.ListenPacket(ctx, destination)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.wrapPacketConn(ctx, conn, winner, target, elapsed), nil
+}
+
+type smartCandidate struct {
+	outbound adapter.Outbound
+	status   smart.Candidate
+	index    int
+}
+
+func (s *Smart) rank(ctx context.Context, network string, destination M.Socksaddr) ([]smartCandidate, string) {
+	site := smart.SiteKey(smartTarget(adapter.ContextFrom(ctx), destination))
+	target := site
+	asn := s.lookupASN(ctx, destination)
+	if s.preferASN && s.targetPolicy != nil {
+		rule := smart.RuleTarget{}
+		if metadata := adapter.ContextFrom(ctx); metadata != nil {
+			rule = metadata.SmartRule
+		}
+		target = s.targetPolicy.Select(time.Now(), target, asn, rule)
+		// Service/site identity, rather than the specific network hosting it,
+		// scopes metrics. Evidence still records the real ASN separately.
+		asn = ""
+	}
+	candidates := s.candidateSnapshot()
+	keys := make([]smart.MetricKey, 0, len(candidates))
+	byTag := make(map[string]adapter.Outbound, len(candidates))
+	indexes := make(map[string]int, len(candidates))
+	for index, candidate := range candidates {
+		if !common.Contains(candidate.Network(), network) {
+			continue
+		}
+		key := smart.MetricKey{Group: s.Tag(), Target: target, ASN: asn, Network: network, Node: candidate.Tag()}
+		keys = append(keys, key)
+		byTag[candidate.Tag()] = candidate
+		indexes[candidate.Tag()] = index
+	}
+	ranked := s.store.Rank(time.Now(), keys)
+	if s.exitWatcher.Load() != nil {
+		s.markResponseCandidates(target, site, ranked, len(candidates))
+	}
+	result := make([]smartCandidate, 0, len(ranked))
+	used := make(map[string]bool, len(ranked))
+	for _, status := range ranked {
+		candidate := byTag[status.Key.Node]
+		if candidate == nil || status.Blocked || !status.Known || status.Weight < smart.AllowedWeight {
+			continue
+		}
+		result = append(result, smartCandidate{candidate, status, indexes[candidate.Tag()]})
+		used[candidate.Tag()] = true
+	}
+	fallback := make([]smartCandidate, 0, len(ranked))
+	for _, status := range ranked {
+		candidate := byTag[status.Key.Node]
+		if candidate == nil || used[candidate.Tag()] || status.Blocked {
+			continue
+		}
+		fallback = append(fallback, smartCandidate{candidate, status, indexes[candidate.Tag()]})
+	}
+	allBlocked := len(result) == 0 && len(fallback) == 0
+	if allBlocked {
+		for _, status := range ranked {
+			candidate := byTag[status.Key.Node]
+			if candidate != nil {
+				fallback = append(fallback, smartCandidate{candidate, status, indexes[candidate.Tag()]})
+			}
+		}
+	}
+	sortFallbackCandidates(fallback, s.history, s.tolerance)
+	statusCandidates := append([]smartCandidate(nil), result...)
+	statusCandidates = append(statusCandidates, fallback...)
+	if allBlocked && len(fallback) > 1 {
+		fallback = fallback[:1]
+	}
+	result = append(result, fallback...)
+	result = s.filterExitSuspicions(site, result)
+	s.updateStatus(statusCandidates)
+	return result, target
+}
+
+func sortFallbackCandidates(candidates []smartCandidate, history *urltest.HistoryStorage, tolerance uint16) {
+	type delay struct {
+		value uint16
+		known bool
+	}
+	delays := make(map[string]delay, len(candidates))
+	var lowest uint16
+	lowestKnown := false
+	if history != nil {
+		for _, candidate := range candidates {
+			entry := history.LoadURLTestHistory(candidate.outbound.Tag())
+			if entry != nil && entry.Delay > 0 {
+				delays[candidate.outbound.Tag()] = delay{entry.Delay, true}
+				if !lowestKnown || entry.Delay < lowest {
+					lowest = entry.Delay
+					lowestKnown = true
+				}
+			}
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := delays[candidates[i].outbound.Tag()], delays[candidates[j].outbound.Tag()]
+		if left.known != right.known {
+			return left.known
+		}
+		if !left.known {
+			return candidates[i].index < candidates[j].index
+		}
+		if tolerance == 0 {
+			if left.value != right.value {
+				return left.value < right.value
+			}
+			return candidates[i].index < candidates[j].index
+		}
+		leftBucket := uint32(left.value-lowest) / (uint32(tolerance) + 1)
+		rightBucket := uint32(right.value-lowest) / (uint32(tolerance) + 1)
+		if leftBucket != rightBucket {
+			return leftBucket < rightBucket
+		}
+		return candidates[i].index < candidates[j].index
+	})
+}
+
+func (s *Smart) updateStatus(candidates []smartCandidate) {
+	updated := time.Now()
+	statuses := make([]adapter.SmartCandidateStatus, 0, len(candidates))
+	for _, candidate := range candidates {
+		statuses = append(statuses, adapter.SmartCandidateStatus{
+			Tag:     candidate.outbound.Tag(),
+			Weight:  candidate.status.Weight,
+			Samples: candidate.status.Samples,
+			Blocked: candidate.status.Blocked,
+		})
+	}
+	s.statusAccess.Lock()
+	s.status.UpdatedAt = &updated
+	s.status.Candidates = statuses
+	s.statusAccess.Unlock()
+}
+
+func (s *Smart) markSelected(candidate smartCandidate) {
+	updated := time.Now()
+	s.statusAccess.Lock()
+	s.status.Selected = candidate.outbound.Tag()
+	s.status.UpdatedAt = &updated
+	s.statusAccess.Unlock()
+}
+
+type smartDialResult[T interface{ Close() error }] struct {
+	index     int
+	candidate smartCandidate
+	conn      T
+	err       error
+	elapsed   time.Duration
+}
+
+func (s *Smart) raceDial(ctx context.Context, network string, destination M.Socksaddr, _ string, candidates []smartCandidate) (net.Conn, smartCandidate, time.Duration, error) {
+	return raceSmartConnection(s, ctx, ctx, candidates, func(ctx context.Context, candidate smartCandidate) (net.Conn, error) {
+		return candidate.outbound.DialContext(ctx, network, destination)
+	})
+}
+
+func (s *Smart) raceListenPacket(ctx context.Context, destination M.Socksaddr, _ string, candidates []smartCandidate) (net.PacketConn, smartCandidate, time.Duration, error) {
+	return raceSmartConnection(s, ctx, ctx, candidates, func(ctx context.Context, candidate smartCandidate) (net.PacketConn, error) {
+		return candidate.outbound.ListenPacket(ctx, destination)
+	})
+}
+
+func raceSmartConnection[T interface{ Close() error }](s *Smart, callerCtx, stageCtx context.Context, candidates []smartCandidate, dial func(context.Context, smartCandidate) (T, error)) (T, smartCandidate, time.Duration, error) {
+	var zero T
+	if err := stageCtx.Err(); err != nil {
+		return zero, smartCandidate{}, 0, err
+	}
+	child, cancel := context.WithCancel(stageCtx)
+	results := make(chan smartDialResult[T], min(5, len(candidates)))
+	// Only the collector owns pending: completed failures are removed before
+	// a local stage timeout can account for the remaining attempts.
+	pending := make(map[int]time.Time)
+	start := func(index int) {
+		candidate := candidates[index]
+		started := time.Now()
+		pending[index] = started
+		go func() {
+			conn, err := dial(child, candidate)
+			results <- smartDialResult[T]{index: index, candidate: candidate, conn: conn, err: err, elapsed: time.Since(started)}
+		}()
+	}
+	finishCancelled := func(active int) {
+		cancel()
+		// A leaf's DeadlineExceeded is an ordinary result, not stage expiry.
+		// Caller cancellation/deadlines and canceled race losers are not failures.
+		if stageCtx.Err() == context.DeadlineExceeded && callerCtx.Err() == nil {
+			for index := range candidates {
+				started, stillPending := pending[index]
+				if !stillPending {
+					continue
+				}
+				if callerCtx.Err() != nil {
+					break
+				}
+				s.recordObservation(candidates[index].status.Key, smart.Observation{Success: false, ConnectTime: time.Since(started)})
+			}
+		}
+		drainSmartResults(results, active)
+	}
+	active, next := 0, 0
+	for active < min(5, len(candidates)) {
+		if err := stageCtx.Err(); err != nil {
+			finishCancelled(active)
+			return zero, smartCandidate{}, 0, err
+		}
+		start(next)
+		next++
+		active++
+	}
+	var errs []error
+	for active > 0 {
+		select {
+		case <-stageCtx.Done():
+			finishCancelled(active)
+			return zero, smartCandidate{}, 0, stageCtx.Err()
+		case result := <-results:
+			active--
+			if err := stageCtx.Err(); err != nil {
+				if any(result.conn) != nil {
+					_ = result.conn.Close()
+				}
+				finishCancelled(active)
+				return zero, smartCandidate{}, 0, err
+			}
+			delete(pending, result.index)
+			if result.err == nil {
+				cancel()
+				drainSmartResults(results, active)
+				return result.conn, result.candidate, result.elapsed, nil
+			}
+			if callerCtx.Err() == nil {
+				s.recordObservation(result.candidate.status.Key, smart.Observation{Success: false, ConnectTime: result.elapsed})
+				errs = append(errs, E.Cause(result.err, "smart candidate ", result.candidate.outbound.Tag()))
+			}
+			if next < len(candidates) && stageCtx.Err() == nil {
+				start(next)
+				next++
+				active++
+			}
+		}
+	}
+	cancel()
+	if len(errs) == 0 {
+		return zero, smartCandidate{}, 0, E.New("all smart candidates were cancelled")
+	}
+	return zero, smartCandidate{}, 0, errors.Join(errs...)
+}
+
+func drainSmartResults[T interface{ Close() error }](results <-chan smartDialResult[T], pending int) {
+	if pending == 0 {
+		return
+	}
+	go func() {
+		for range pending {
+			result := <-results
+			if any(result.conn) != nil {
+				_ = result.conn.Close()
+			}
+		}
+	}()
+}
+
+func (s *Smart) recordObservation(key smart.MetricKey, observation smart.Observation) {
+	now := time.Now()
+	accept, reset := s.selection.acceptObservation(now, observation.Success)
+	if reset {
+		s.store.ResetBreakers()
+	}
+	if !accept {
+		return
+	}
+	s.store.Record(now, key, observation)
+	s.maybeProbeExit(key.Node)
+	if candidate := s.store.Candidate(now, key); candidate.Blocked {
+		_ = s.closeConnections(key)
+	}
+	if s.collectData && s.smartService != nil && (s.sampleRate >= 1 || rand.Float64() < s.sampleRate) {
+		if input, loaded := s.store.ModelInput(key); loaded {
+			s.smartService.Collect(input, key.Group, key.Node, s.store.Candidate(now, key).Weight)
+		}
+	}
+}
+
+func (s *Smart) wrapConn(ctx context.Context, conn net.Conn, candidate smartCandidate, target, network string, destination M.Socksaddr, connectTime time.Duration) net.Conn {
+	s.markSelected(candidate)
+	recordSmartWinner(ctx, candidate.outbound)
+	key := smartCandidateKey(s, candidate, target, network)
+	rule := smart.RuleTarget{}
+	asn := ""
+	if s.preferASN && s.targetPolicy != nil {
+		if metadata := adapter.ContextFrom(ctx); metadata != nil {
+			rule = metadata.SmartRule
+			asn = s.lookupASN(ctx, metadata.Destination)
+		}
+	}
+	probe := s.responseContext(ctx, candidate.outbound, target, destination)
+	var wrapped *smartConn
+	wrapped = newSmartConn(conn, func(success bool, upload, download int64, firstByte, duration time.Duration, lossRate float64, lossAvailable bool) {
+		s.untrackConnection(wrapped)
+		if success && download > 0 && s.targetPolicy != nil {
+			s.targetPolicy.RecordSuccess(time.Now(), rule, asn)
+		}
+		s.recordObservation(key, smart.Observation{Closed: true, Success: success, ConnectTime: connectTime, FirstByte: firstByte, UploadBytes: upload, DownloadBytes: download, PeakUploadBPS: wrapped.upload.Peak(), PeakDownloadBPS: wrapped.download.Peak(), Duration: duration, LossRate: lossRate, LossAvailable: lossAvailable, SentPackets: wrapped.tcpStats.Sent, RetransmittedPackets: wrapped.tcpStats.Retransmitted})
+		if !wrapped.controlled.Load() {
+			s.probeAfterClose(probe, upload, download, duration, success)
+		}
+	})
+	s.trackConnection(key, wrapped)
+	return wrapped
+}
+
+func (s *Smart) wrapPacketConn(ctx context.Context, conn net.PacketConn, candidate smartCandidate, target string, connectTime time.Duration) net.PacketConn {
+	s.markSelected(candidate)
+	recordSmartWinner(ctx, candidate.outbound)
+	key := smartCandidateKey(s, candidate, target, N.NetworkUDP)
+	packetConn, ok := conn.(N.PacketConn)
+	if !ok {
+		var wrapped *smartPlainPacketConn
+		wrapped = newSmartPlainPacketConn(conn, func(success bool, upload, download int64, firstByte, duration time.Duration) {
+			s.untrackConnection(wrapped)
+			s.recordObservation(key, smart.Observation{Closed: true, Success: success, ConnectTime: connectTime, FirstByte: firstByte, UploadBytes: upload, DownloadBytes: download, PeakUploadBPS: wrapped.upload.Peak(), PeakDownloadBPS: wrapped.download.Peak(), Duration: duration})
+		})
+		s.trackConnection(key, wrapped)
+		return wrapped
+	}
+	var wrapped *smartPacketConn
+	wrapped = newSmartPacketConn(conn, packetConn, func(success bool, upload, download int64, firstByte, duration time.Duration) {
+		s.untrackConnection(wrapped)
+		s.recordObservation(key, smart.Observation{Closed: true, Success: success, ConnectTime: connectTime, FirstByte: firstByte, UploadBytes: upload, DownloadBytes: download, PeakUploadBPS: wrapped.upload.Peak(), PeakDownloadBPS: wrapped.download.Peak(), Duration: duration})
+	})
+	s.trackConnection(key, wrapped)
+	return wrapped
+}
+
+func recordSmartWinner(ctx context.Context, winner adapter.Outbound) {
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && metadata.SelectedOutbound != nil {
+		metadata.SelectedOutbound.Store(&winner)
+	}
+}
+
+func (s *Smart) trackConnection(key smart.MetricKey, conn io.Closer) {
+	s.activeAccess.Lock()
+	if s.closed.Load() {
+		s.activeAccess.Unlock()
+		_ = conn.Close()
+		return
+	}
+	if s.activeConnections == nil {
+		s.activeConnections = make(map[io.Closer]smart.MetricKey)
+	}
+	s.activeConnections[conn] = key
+	s.activeAccess.Unlock()
+}
+
+func smartCandidateKey(group *Smart, candidate smartCandidate, target, network string) smart.MetricKey {
+	if candidate.status.Key.Target != "" {
+		return candidate.status.Key
+	}
+	return smart.MetricKey{Group: group.Tag(), Target: target, Network: network, Node: candidate.outbound.Tag()}
+}
+
+func (s *Smart) untrackConnection(conn io.Closer) {
+	s.activeAccess.Lock()
+	delete(s.activeConnections, conn)
+	s.activeAccess.Unlock()
+}
+
+func (s *Smart) closeActiveConnections() error {
+	s.activeAccess.Lock()
+	connections := make([]io.Closer, 0, len(s.activeConnections))
+	for conn := range s.activeConnections {
+		connections = append(connections, conn)
+	}
+	s.activeAccess.Unlock()
+	var err error
+	for _, conn := range connections {
+		err = errors.Join(err, conn.Close())
+	}
+	return err
+}
+
+func (s *Smart) closeConnections(key smart.MetricKey) error {
+	s.activeAccess.Lock()
+	connections := make([]io.Closer, 0)
+	for conn, activeKey := range s.activeConnections {
+		if activeKey.Group == key.Group && activeKey.Target == key.Target && activeKey.Node == key.Node {
+			connections = append(connections, conn)
+		}
+	}
+	s.activeAccess.Unlock()
+	var err error
+	for _, conn := range connections {
+		if tracked, ok := conn.(*smartConn); ok {
+			tracked.controlled.Store(true)
+		}
+		err = errors.Join(err, conn.Close())
+	}
+	return err
+}
+
+func (s *Smart) URLTest(ctx context.Context) (map[string]uint16, error) {
+	return s.probe(ctx)
+}
+
+func (s *Smart) runProbe(ctx context.Context) {
+	probeCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	_, _ = s.probe(probeCtx)
+}
+
+func (s *Smart) probe(ctx context.Context) (map[string]uint16, error) {
+	s.probeAccess.Lock()
+	if s.probing {
+		s.probeAccess.Unlock()
+		return map[string]uint16{}, nil
+	}
+	s.probing = true
+	s.probeAccess.Unlock()
+	defer func() {
+		s.probeAccess.Lock()
+		s.probing = false
+		s.probeAccess.Unlock()
+	}()
+	candidates := s.candidateSnapshot()
+	result := make(map[string]uint16)
+	failed := make([]string, 0, len(candidates))
+	var access sync.Mutex
+	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](5))
+	for _, candidate := range candidates {
+		candidate := candidate
+		if !common.Contains(candidate.Network(), N.NetworkTCP) {
+			continue
+		}
+		b.Go(candidate.Tag(), func() (any, error) {
+			testCtx, cancel := context.WithTimeout(ctx, s.timeout)
+			delay, err := s.urlTest(testCtx, candidate)
+			cancel()
+			access.Lock()
+			if err == nil && delay > 0 {
+				result[candidate.Tag()] = delay
+			} else {
+				failed = append(failed, candidate.Tag())
+			}
+			access.Unlock()
+			return nil, nil
+		})
+	}
+	b.Wait()
+	if len(candidates) > 0 && len(result) == 0 {
+		return result, E.New("all smart probes failed")
+	}
+	if s.history != nil {
+		now := time.Now()
+		for tag, delay := range result {
+			s.history.StoreSmartURLTestHistory(tag, &adapter.URLTestHistory{Time: now, Delay: delay})
+		}
+		for _, tag := range failed {
+			s.history.DeleteSmartURLTestHistory(tag)
+		}
+	}
+	return result, nil
+}
+
+func (s *Smart) References() []string {
+	return s.All()
+}
+
+func (s *Smart) invalidateCandidates() {
+	if s.closed.Load() {
+		return
+	}
+	s.candidateDirty.Store(true)
+	select {
+	case s.candidateUpdates <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Smart) candidateSnapshot() []adapter.Outbound {
+	if !s.closed.Load() && s.candidateDirty.Swap(false) {
+		if err := s.rebuildCandidates(""); err != nil {
+			s.candidateDirty.Store(true)
+		}
+	}
+	s.candidateAccess.RLock()
+	defer s.candidateAccess.RUnlock()
+	return slices.Clone(s.candidates)
+}
+
+func (s *Smart) rebuildCandidates(updatedProvider string) error {
+	s.providerAccess.Lock()
+	changed := false
+	defer func() {
+		s.providerAccess.Unlock()
+		if changed {
+			s.notifyMembersUpdated()
+		}
+	}()
+	if s.closed.Load() {
+		return nil
+	}
+	if s.candidateUpdates == nil {
+		s.candidateUpdates = make(chan struct{}, 1)
+	}
+	observed := make(map[adapter.Outbound]bool)
+	var roots []adapter.Outbound
+	for index, tag := range s.tags {
+		candidate, loaded := s.outbound.Outbound(tag)
+		if !loaded {
+			return E.New("outbound ", index, " not found: ", tag)
+		}
+		roots = append(roots, candidate)
+	}
+	for _, providerTag := range s.providerTags {
+		if providerTag != updatedProvider && s.outboundsCache[providerTag] != nil {
+			roots = append(roots, s.outboundsCache[providerTag]...)
+			continue
+		}
+		provider := s.providers[providerTag]
+		if provider == nil {
+			continue
+		}
+		var cached []adapter.Outbound
+		for _, candidate := range provider.Outbounds() {
+			if s.exclude != nil && s.exclude.MatchString(candidate.Tag()) {
+				continue
+			}
+			if s.include != nil && !s.include.MatchString(candidate.Tag()) {
+				continue
+			}
+			cached = append(cached, candidate)
+		}
+		s.outboundsCache[providerTag] = cached
+		roots = append(roots, cached...)
+	}
+	var candidates []adapter.Outbound
+	seen := make(map[string]bool)
+	for _, candidate := range roots {
+		s.flattenCandidate(candidate, make(map[string]bool), seen, observed, &candidates)
+	}
+	for member, unregister := range s.memberCallbacks {
+		if !observed[member] {
+			unregister()
+			delete(s.memberCallbacks, member)
+		}
+	}
+	s.candidateAccess.Lock()
+	changed = !slices.Equal(s.candidates, candidates)
+	s.candidates = candidates
+	s.candidateAccess.Unlock()
+	return nil
+}
+
+func (s *Smart) flattenCandidate(candidate adapter.Outbound, visiting map[string]bool, seen map[string]bool, observed map[adapter.Outbound]bool, result *[]adapter.Outbound) {
+	if candidate == nil || candidate == s {
+		return
+	}
+	tag := candidate.Tag()
+	if visiting[tag] {
+		return
+	}
+	if group, isGroup := candidate.(adapter.OutboundGroup); isGroup {
+		if updates, ok := candidate.(adapter.OutboundGroupUpdates); ok {
+			observed[candidate] = true
+			if s.memberCallbacks == nil {
+				s.memberCallbacks = make(map[adapter.Outbound]func())
+			}
+			if s.memberCallbacks[candidate] == nil {
+				s.memberCallbacks[candidate] = updates.RegisterMemberUpdateCallback(s.invalidateCandidates)
+			}
+		}
+		visiting[tag] = true
+		for _, childTag := range group.All() {
+			child, loaded := s.outbound.Outbound(childTag)
+			if loaded {
+				s.flattenCandidate(child, visiting, seen, observed, result)
+			}
+		}
+		delete(visiting, tag)
+		return
+	}
+	if !seen[tag] {
+		seen[tag] = true
+		*result = append(*result, candidate)
+	}
+}
+
+func (s *Smart) onProviderUpdated(tag string) error {
+	if s.closed.Load() {
+		return nil
+	}
+	if _, loaded := s.providers[tag]; !loaded {
+		return E.New("outbound provider not found: ", tag)
+	}
+	return s.rebuildCandidates(tag)
+}
+
+func (s *Smart) unregisterProviderCallbacks() {
+	s.providerAccess.Lock()
+	defer s.providerAccess.Unlock()
+	for tag, handle := range s.providerHandles {
+		if provider := s.providers[tag]; provider != nil && handle != nil {
+			provider.UnregisterCallback(handle)
+		}
+	}
+	clear(s.providerHandles)
+	for _, unregister := range s.memberCallbacks {
+		unregister()
+	}
+	clear(s.memberCallbacks)
+}
+
+func smartTarget(metadata *adapter.InboundContext, destination M.Socksaddr) string {
+	var target string
+	if metadata != nil {
+		if metadata.SniffHost != "" {
+			target = metadata.SniffHost
+		} else if metadata.Domain != "" {
+			target = metadata.Domain
+		}
+	}
+	if target == "" {
+		target = destination.Fqdn
+	}
+	if target == "" {
+		target = destination.AddrString()
+	}
+	return strings.ToLower(strings.TrimSuffix(target, "."))
+}
+
+func (s *Smart) lookupASN(ctx context.Context, destination M.Socksaddr) string {
+	if !s.preferASN || s.smartService == nil {
+		return ""
+	}
+	if destination.Addr.IsValid() {
+		if asn := s.smartService.LookupASN(destination.Addr); asn != "" {
+			return asn
+		}
+	}
+	metadata := adapter.ContextFrom(ctx)
+	if metadata == nil {
+		return ""
+	}
+	if metadata.Destination.Addr.IsValid() {
+		if asn := s.smartService.LookupASN(metadata.Destination.Addr); asn != "" {
+			return asn
+		}
+	}
+	for _, address := range metadata.DestinationAddresses {
+		if asn := s.smartService.LookupASN(address); asn != "" {
+			return asn
+		}
+	}
+	return ""
+}
