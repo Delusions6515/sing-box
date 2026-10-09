@@ -28,6 +28,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/filemanager"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -156,7 +157,7 @@ func TestSmartRecordsSuccessfulConnectionWinner(t *testing.T) {
 			if network == N.NetworkTCP {
 				local, peer := net.Pipe()
 				defer peer.Close()
-				require.NoError(t, group.wrapConn(ctx, local, candidate, "example.com", network, 0).Close())
+				require.NoError(t, group.wrapConn(ctx, local, candidate, "example.com", network, M.ParseSocksaddr("example.com:443"), 0).Close())
 			} else {
 				packet, err := net.ListenPacket("udp", "127.0.0.1:0")
 				require.NoError(t, err)
@@ -600,7 +601,7 @@ func TestSmartCloseRecordsAndFlushesActiveConnection(t *testing.T) {
 	group.maxHistoryEntries = 100
 	left, right := net.Pipe()
 	defer right.Close()
-	wrapped := group.wrapConn(context.Background(), left, smartCandidate{outbound: &smartTestOutbound{tag: "node"}}, "example.com", N.NetworkTCP, time.Millisecond)
+	wrapped := group.wrapConn(context.Background(), left, smartCandidate{outbound: &smartTestOutbound{tag: "node"}}, "example.com", N.NetworkTCP, M.ParseSocksaddr("example.com:443"), time.Millisecond)
 	require.NoError(t, group.Close())
 	key := smart.MetricKey{Group: "smart", Target: "example.com", Network: N.NetworkTCP, Node: "node"}
 	require.Equal(t, int64(1), group.store.Candidate(time.Now(), key).Samples)

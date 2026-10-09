@@ -21,6 +21,7 @@ type smartConn struct {
 	upload       smartTransferCounter
 	download     smartTransferCounter
 	failed       atomic.Bool
+	controlled   atomic.Bool
 	firstByte    atomic.Int64
 	onClose      func(bool, int64, int64, time.Duration, time.Duration, float64, bool)
 	initialTCP   smart.TCPStats
