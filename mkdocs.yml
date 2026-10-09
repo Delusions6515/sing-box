@@ -81,7 +81,8 @@ nav:
           - AnyTLS client metadata: manual/misc/anytls-client-metadata.md
           - eBPF troubleshooting: manual/misc/ebpf-troubleshooting.md
           - eBPF kernel requirements: manual/misc/ebpf-kernel-requirements.md
-          - eBPF checksum/offload verification: manual/misc/ebpf-checksum-offload-verification.md
+          - eBPF checksum/offload verification:
+              manual/misc/ebpf-checksum-offload-verification.md
   - Configuration:
       - configuration/index.md
       - JSON Schema: configuration/schema.md
@@ -141,12 +142,15 @@ nav:
           - Certificate Provider:
               - configuration/shared/certificate-provider/index.md
               - ACME: configuration/shared/certificate-provider/acme.md
-              - Tailscale: configuration/shared/certificate-provider/tailscale.md
-              - Cloudflare Origin CA: configuration/shared/certificate-provider/cloudflare-origin-ca.md
+              - Tailscale:
+                  configuration/shared/certificate-provider/tailscale.md
+              - Cloudflare Origin CA:
+                  configuration/shared/certificate-provider/cloudflare-origin-ca.md
           - DNS01 Challenge Fields: configuration/shared/dns01_challenge.md
           - Pre-match: configuration/shared/pre-match.md
           - Multiplex: configuration/shared/multiplex.md
           - V2Ray Transport: configuration/shared/v2ray-transport.md
+          - XHTTP: configuration/shared/v2ray-xhttp.md
           - UDP over TCP: configuration/shared/udp-over-tcp.md
           - UDP NAT Fields: configuration/shared/udp-nat.md
           - TCP Brutal: configuration/shared/tcp-brutal.md
