@@ -45,6 +45,7 @@ const (
 	smartFlushInterval            = 5 * time.Minute
 	smartGCInterval               = 2 * time.Hour
 	smartRecoveryInterval         = 10 * time.Minute
+	smartResponseRecoveryInterval = 15 * time.Minute
 	smartPrefetchInterval         = 15 * time.Minute
 )
 
@@ -112,6 +113,16 @@ type Smart struct {
 	statusAccess sync.RWMutex
 	status       adapter.SmartGroupStatus
 
+	responseAccess   sync.Mutex
+	responseCtx      context.Context
+	responseCancel   context.CancelFunc
+	responseEpoch    uint64
+	responseThrottle *smart.ProbeThrottle
+	responseBlocks   map[smartResponseKey]smartResponseBlock
+	responseTargets  map[string]string
+	responseWorkers  sync.WaitGroup
+	exitWatcher      atomic.Pointer[smart.ExitWatcher]
+
 	probeAccess sync.Mutex
 	probing     bool
 	closed      atomic.Bool
@@ -169,7 +180,7 @@ func NewSmart(ctx context.Context, _ adapter.Router, logger log.ContextLogger, t
 		smartService.EnableModel()
 		storeConfig.Predict = smartService.Predict
 	}
-	return &Smart{
+	result := &Smart{
 		Adapter:             outbound.NewAdapter(C.TypeSmart, tag, networks, options.Outbounds),
 		ctx:                 ctx,
 		outbound:            service.FromContext[adapter.OutboundManager](ctx),
@@ -205,7 +216,9 @@ func NewSmart(ctx context.Context, _ adapter.Router, logger log.ContextLogger, t
 		historyRetention:    defaultSmartHistoryRetention,
 		maxHistoryEntries:   defaultSmartMaxHistoryEntries,
 		externalConnections: interrupt.NewGroup(),
-	}, nil
+	}
+	result.initResponseProbes()
+	return result, nil
 }
 
 func (s *Smart) Start(stage adapter.StartStage, scope *adapter.Scope) error {
@@ -265,7 +278,13 @@ func (s *Smart) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.responseAccess.Lock()
+	if s.responseCancel != nil {
+		s.responseCancel()
+	}
+	s.responseAccess.Unlock()
 	s.worker.Wait()
+	s.responseWorkers.Wait()
 	s.unregisterProviderCallbacks()
 	closeErr := s.closeActiveConnections()
 	if s.externalConnections != nil {
@@ -283,11 +302,13 @@ func (s *Smart) loop(ctx context.Context) {
 	flushTicker := time.NewTicker(smartFlushInterval)
 	gcTicker := time.NewTicker(smartGCInterval)
 	recoveryTicker := time.NewTicker(smartRecoveryInterval)
+	responseRecoveryTicker := time.NewTicker(smartResponseRecoveryInterval)
 	prefetchTicker := time.NewTicker(smartPrefetchInterval)
 	defer probeTicker.Stop()
 	defer flushTicker.Stop()
 	defer gcTicker.Stop()
 	defer recoveryTicker.Stop()
+	defer responseRecoveryTicker.Stop()
 	defer prefetchTicker.Stop()
 	for {
 		select {
@@ -310,6 +331,8 @@ func (s *Smart) loop(ctx context.Context) {
 			s.store.GC(time.Now(), s.historyRetention, s.maxHistoryEntries)
 		case <-recoveryTicker.C:
 			s.store.Recover(time.Now())
+		case <-responseRecoveryTicker.C:
+			s.recheckResponses()
 		case <-prefetchTicker.C:
 			s.store.Prefetch(time.Now(), s.Tag())
 		}
@@ -351,7 +374,18 @@ func (s *Smart) Weights() []smart.NodeRankItem {
 // ClearCache drops all learned metrics and their persisted history so the
 // group relearns from scratch.
 func (s *Smart) ClearCache() error {
+	s.responseAccess.Lock()
 	s.store.Clear()
+	s.responseEpoch++
+	if s.responseCancel != nil {
+		s.responseCancel()
+		s.responseCtx, s.responseCancel = context.WithCancel(s.ctx)
+		s.responseThrottle = new(smart.ProbeThrottle)
+		clear(s.responseBlocks)
+		clear(s.responseTargets)
+		s.resetExitWatcherLocked()
+	}
+	s.responseAccess.Unlock()
 	s.selection.clear()
 	if s.targetPolicy != nil {
 		s.targetPolicy.Clear()
@@ -394,7 +428,7 @@ func (s *Smart) DialContext(ctx context.Context, network string, destination M.S
 	if err != nil {
 		return nil, err
 	}
-	return s.wrapConn(ctx, conn, winner, target, transport, elapsed), nil
+	return s.wrapConn(ctx, conn, winner, target, transport, destination, elapsed), nil
 }
 
 func (s *Smart) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -421,7 +455,8 @@ type smartCandidate struct {
 }
 
 func (s *Smart) rank(ctx context.Context, network string, destination M.Socksaddr) ([]smartCandidate, string) {
-	target := smart.SiteKey(smartTarget(adapter.ContextFrom(ctx), destination))
+	site := smart.SiteKey(smartTarget(adapter.ContextFrom(ctx), destination))
+	target := site
 	asn := s.lookupASN(ctx, destination)
 	if s.preferASN && s.targetPolicy != nil {
 		rule := smart.RuleTarget{}
@@ -447,6 +482,9 @@ func (s *Smart) rank(ctx context.Context, network string, destination M.Socksadd
 		indexes[candidate.Tag()] = index
 	}
 	ranked := s.store.Rank(time.Now(), keys)
+	if s.exitWatcher.Load() != nil {
+		s.markResponseCandidates(target, site, ranked, len(candidates))
+	}
 	result := make([]smartCandidate, 0, len(ranked))
 	used := make(map[string]bool, len(ranked))
 	for _, status := range ranked {
@@ -481,6 +519,7 @@ func (s *Smart) rank(ctx context.Context, network string, destination M.Socksadd
 		fallback = fallback[:1]
 	}
 	result = append(result, fallback...)
+	result = s.filterExitSuspicions(site, result)
 	s.updateStatus(statusCandidates)
 	return result, target
 }
@@ -683,6 +722,7 @@ func (s *Smart) recordObservation(key smart.MetricKey, observation smart.Observa
 		return
 	}
 	s.store.Record(now, key, observation)
+	s.maybeProbeExit(key.Node)
 	if candidate := s.store.Candidate(now, key); candidate.Blocked {
 		_ = s.closeConnections(key)
 	}
@@ -693,7 +733,7 @@ func (s *Smart) recordObservation(key smart.MetricKey, observation smart.Observa
 	}
 }
 
-func (s *Smart) wrapConn(ctx context.Context, conn net.Conn, candidate smartCandidate, target, network string, connectTime time.Duration) net.Conn {
+func (s *Smart) wrapConn(ctx context.Context, conn net.Conn, candidate smartCandidate, target, network string, destination M.Socksaddr, connectTime time.Duration) net.Conn {
 	s.markSelected(candidate)
 	recordSmartWinner(ctx, candidate.outbound)
 	key := smartCandidateKey(s, candidate, target, network)
@@ -705,6 +745,7 @@ func (s *Smart) wrapConn(ctx context.Context, conn net.Conn, candidate smartCand
 			asn = s.lookupASN(ctx, metadata.Destination)
 		}
 	}
+	probe := s.responseContext(ctx, candidate.outbound, target, destination)
 	var wrapped *smartConn
 	wrapped = newSmartConn(conn, func(success bool, upload, download int64, firstByte, duration time.Duration, lossRate float64, lossAvailable bool) {
 		s.untrackConnection(wrapped)
@@ -712,6 +753,9 @@ func (s *Smart) wrapConn(ctx context.Context, conn net.Conn, candidate smartCand
 			s.targetPolicy.RecordSuccess(time.Now(), rule, asn)
 		}
 		s.recordObservation(key, smart.Observation{Closed: true, Success: success, ConnectTime: connectTime, FirstByte: firstByte, UploadBytes: upload, DownloadBytes: download, PeakUploadBPS: wrapped.upload.Peak(), PeakDownloadBPS: wrapped.download.Peak(), Duration: duration, LossRate: lossRate, LossAvailable: lossAvailable, SentPackets: wrapped.tcpStats.Sent, RetransmittedPackets: wrapped.tcpStats.Retransmitted})
+		if !wrapped.controlled.Load() {
+			s.probeAfterClose(probe, upload, download, duration, success)
+		}
 	})
 	s.trackConnection(key, wrapped)
 	return wrapped
@@ -798,6 +842,9 @@ func (s *Smart) closeConnections(key smart.MetricKey) error {
 	s.activeAccess.Unlock()
 	var err error
 	for _, conn := range connections {
+		if tracked, ok := conn.(*smartConn); ok {
+			tracked.controlled.Store(true)
+		}
 		err = errors.Join(err, conn.Close())
 	}
 	return err

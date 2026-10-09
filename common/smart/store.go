@@ -71,9 +71,10 @@ type NodeRankItem struct {
 }
 
 type Snapshot struct {
-	Version  int              `json:"version"`
-	Metrics  []MetricSnapshot `json:"metrics"`
-	Evidence []ASNEvidence    `json:"asn_evidence,omitempty"`
+	Version  int                      `json:"version"`
+	Metrics  []MetricSnapshot         `json:"metrics"`
+	Evidence []ASNEvidence            `json:"asn_evidence,omitempty"`
+	Exits    map[string]ExitNodeState `json:"exits,omitempty"`
 }
 
 // MetricSnapshot deliberately excludes the in-memory breaker state.
@@ -161,6 +162,7 @@ func (m *metric) modelInput(key MetricKey) ModelInput {
 type Store struct {
 	access          sync.RWMutex
 	metrics         map[MetricKey]*metric
+	exits           map[string]ExitNodeState
 	rankCache       map[string]rankCacheEntry
 	config          Config
 	revision        uint64
@@ -527,6 +529,7 @@ func (s *Store) Clear() {
 	s.access.Lock()
 	defer s.access.Unlock()
 	s.metrics = make(map[MetricKey]*metric)
+	s.exits = nil
 	s.rankCache = make(map[string]rankCacheEntry)
 	s.revision++
 }
@@ -603,12 +606,13 @@ func (s *Store) SnapshotAndRevision(now time.Time, retention time.Duration, maxE
 			LastUsed:             entry.LastUsed,
 		})
 	}
+	exits := pruneExitNodes(s.exits, now, retention, maxEntries)
 	s.access.RUnlock()
 	sort.Slice(metrics, func(i, j int) bool { return metrics[i].LastUsed.After(metrics[j].LastUsed) })
 	if maxEntries > 0 && len(metrics) > maxEntries {
 		metrics = metrics[:maxEntries]
 	}
-	return Snapshot{Version: SnapshotVersion, Metrics: metrics}, revision
+	return Snapshot{Version: SnapshotVersion, Metrics: metrics, Exits: exits}, revision
 }
 
 // PruneSnapshot filters expired and invalid metrics before they enter the
@@ -632,6 +636,7 @@ func PruneSnapshot(snapshot Snapshot, now time.Time, retention time.Duration, ma
 		metrics = metrics[:maxEntries]
 	}
 	snapshot.Metrics = metrics
+	snapshot.Exits = pruneExitNodes(snapshot.Exits, now, retention, maxEntries)
 	return snapshot
 }
 
@@ -656,6 +661,8 @@ func (s *Store) Restore(snapshot Snapshot) bool {
 	snapshot = PruneSnapshot(snapshot, time.Time{}, 0, s.config.MaxEntries)
 	s.access.Lock()
 	defer s.access.Unlock()
+	s.exits = snapshot.Exits
+	s.rankCache = make(map[string]rankCacheEntry)
 	s.metrics = make(map[MetricKey]*metric, len(snapshot.Metrics))
 	for _, persisted := range snapshot.Metrics {
 		if persisted.Key.Target == "" {
@@ -708,6 +715,15 @@ func (s *Store) Merge(snapshot Snapshot) bool {
 		current.LossSamples += persisted.LossSamples
 		current.SentPackets += persisted.SentPackets
 		current.RetransmittedPackets += persisted.RetransmittedPackets
+	}
+	if s.exits == nil {
+		s.exits = make(map[string]ExitNodeState)
+	}
+	for node, state := range snapshot.Exits {
+		current, exists := s.exits[node]
+		if !exists || max(state.Updated, state.Failed) > max(current.Updated, current.Failed) {
+			s.exits[node] = state
+		}
 	}
 	return true
 }
