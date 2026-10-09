@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -159,9 +160,15 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	}
 	if selectedRule != nil {
 		metadata.RouteRule = selectedRule.String()
+		if identity, ok := selectedRule.(adapter.SmartRuleTarget); ok {
+			metadata.SmartRule = identity.SmartTarget()
+		}
 	}
 	metadata.RouteOutbound = selectedOutbound.Tag()
 	metadata.OutboundChain = chain
+	if _, smart := chain[len(chain)-1].(adapter.SmartGroup); smart {
+		metadata.SelectedOutbound = new(atomic.Pointer[adapter.Outbound])
+	}
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
@@ -201,6 +208,11 @@ func isPassOutbound(manager adapter.OutboundManager, tag string) bool {
 func resolveOutbound(outbound adapter.Outbound, network string, metadata *adapter.InboundContext) ([]adapter.Outbound, error) {
 	chain := []adapter.Outbound{outbound}
 	for {
+		// Smart selects a leaf when it dials; resolving it here would bypass
+		// its per-connection ranking, fallback, and observations.
+		if _, isSmart := outbound.(adapter.SmartGroup); isSmart {
+			break
+		}
 		group, isGroup := outbound.(adapter.OutboundGroup)
 		if !isGroup {
 			break
@@ -353,9 +365,15 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 	if selectedRule != nil {
 		metadata.RouteRule = selectedRule.String()
+		if identity, ok := selectedRule.(adapter.SmartRuleTarget); ok {
+			metadata.SmartRule = identity.SmartTarget()
+		}
 	}
 	metadata.RouteOutbound = selectedOutbound.Tag()
 	metadata.OutboundChain = chain
+	if _, smart := chain[len(chain)-1].(adapter.SmartGroup); smart {
+		metadata.SelectedOutbound = new(atomic.Pointer[adapter.Outbound])
+	}
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
@@ -661,6 +679,9 @@ func (r *Router) selectPreMatchOutbound(metadata *adapter.InboundContext, outbou
 			return nil, adapter.PreMatchContinue
 		}
 		return append([]adapter.Outbound{outbound}, selectedChain...), action
+	}
+	if _, isSmart := outbound.(adapter.SmartGroup); isSmart {
+		return nil, adapter.PreMatchContinue
 	}
 	if group, isGroup := outbound.(adapter.OutboundGroup); isGroup {
 		chain, action := r.selectPreMatchOutbound(metadata, group.Selected(metadata.Network), depth+1)

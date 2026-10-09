@@ -729,12 +729,12 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	}
 	historyStorage := boxService.urlTestHistoryStorage
 	urlTest, isURLTest := outbound.(*group.URLTest)
-	loadBalance, isLoadBalance := outbound.(adapter.LoadBalanceGroup)
+	testable, isTestable := outbound.(adapter.URLTestableGroup)
 	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
-	} else if isLoadBalance {
-		go loadBalance.URLTest(boxService.ctx)
+	} else if isTestable {
+		go testable.URLTest(boxService.ctx)
 	} else if isOutboundGroup {
 		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
 			itOutbound, _ := boxService.outboundManager.Outbound(it)
@@ -877,9 +877,10 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
 }
 
 type connectionSnapshot struct {
-	uplink     int64
-	downlink   int64
-	hadTraffic bool
+	uplink         int64
+	downlink       int64
+	hadTraffic     bool
+	winnerReported bool
 }
 
 func (s *StartedService) buildInitialConnectionState(manager *trafficcontrol.Manager, snapshots map[uuid.UUID]connectionSnapshot) []*ConnectionEvent {
@@ -892,8 +893,9 @@ func (s *StartedService) buildInitialConnectionState(manager *trafficcontrol.Man
 			Connection: buildConnectionProto(metadata),
 		})
 		snapshots[metadata.ID] = connectionSnapshot{
-			uplink:   metadata.Upload.Load(),
-			downlink: metadata.Download.Load(),
+			uplink:         metadata.Upload.Load(),
+			downlink:       metadata.Download.Load(),
+			winnerReported: metadata.WinningOutbound() != nil,
 		}
 	}
 
@@ -917,8 +919,9 @@ func (s *StartedService) applyConnectionEvent(event trafficcontrol.ConnectionEve
 			return nil
 		}
 		snapshots[event.ID] = connectionSnapshot{
-			uplink:   event.Metadata.Upload.Load(),
-			downlink: event.Metadata.Download.Load(),
+			uplink:         event.Metadata.Upload.Load(),
+			downlink:       event.Metadata.Download.Load(),
+			winnerReported: event.Metadata.WinningOutbound() != nil,
 		}
 		return &ConnectionEvent{
 			Type:       ConnectionEventType_CONNECTION_EVENT_NEW,
@@ -962,8 +965,9 @@ func (s *StartedService) buildTrafficUpdates(manager *trafficcontrol.Manager, sn
 		snapshot, exists := snapshots[metadata.ID]
 		if !exists {
 			snapshots[metadata.ID] = connectionSnapshot{
-				uplink:   currentUpload,
-				downlink: currentDownload,
+				uplink:         currentUpload,
+				downlink:       currentDownload,
+				winnerReported: metadata.WinningOutbound() != nil,
 			}
 			events = append(events, &ConnectionEvent{
 				Type:       ConnectionEventType_CONNECTION_EVENT_NEW,
@@ -971,6 +975,15 @@ func (s *StartedService) buildTrafficUpdates(manager *trafficcontrol.Manager, sn
 				Connection: buildConnectionProto(metadata),
 			})
 			continue
+		}
+		if !snapshot.winnerReported && metadata.WinningOutbound() != nil {
+			snapshot.winnerReported = true
+			snapshots[metadata.ID] = snapshot
+			events = append(events, &ConnectionEvent{
+				Type:       ConnectionEventType_CONNECTION_EVENT_UPDATE,
+				Id:         metadata.ID.String(),
+				Connection: buildConnectionProto(metadata),
+			})
 		}
 		uplinkDelta := currentUpload - snapshot.uplink
 		downlinkDelta := currentDownload - snapshot.downlink
@@ -1067,6 +1080,13 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 			processInfo.ProcessPath = metadata.Metadata.ProcessInfo.ProcessPaths[0]
 		}
 	}
+	winner := metadata.WinningOutbound()
+	outbound, outboundType := metadata.Outbound, metadata.OutboundType
+	chain := metadata.Chain
+	if winner != nil {
+		outbound, outboundType = winner.Tag(), winner.Type()
+		chain = metadata.DisplayChain()
+	}
 	return &Connection{
 		Id:            metadata.ID.String(),
 		Inbound:       metadata.Metadata.Inbound,
@@ -1083,9 +1103,9 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 		UplinkTotal:   uplinkTotal,
 		DownlinkTotal: downlinkTotal,
 		Rule:          rule,
-		Outbound:      metadata.Outbound,
-		OutboundType:  metadata.OutboundType,
-		ChainList:     metadata.Chain,
+		Outbound:      outbound,
+		OutboundType:  outboundType,
+		ChainList:     chain,
 		ProcessInfo:   processInfo,
 	}
 }

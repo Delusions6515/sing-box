@@ -109,6 +109,16 @@ func (m *ReferenceManager) Start(stage adapter.StartStage, scope *adapter.Scope)
 	if m.pauseManager != nil {
 		m.devicePaused.Store(m.pauseManager.IsDevicePaused())
 	}
+	outboundManager := service.FromContext[adapter.OutboundManager](m.ctx)
+	for _, outbound := range outboundManager.Outbounds() {
+		if updates, ok := outbound.(adapter.OutboundGroupUpdates); ok {
+			unregister := updates.RegisterMemberUpdateCallback(func() { m.subscriber.Emit(struct{}{}) })
+			scope.Add(func() error {
+				unregister()
+				return nil
+			})
+		}
+	}
 	m.update()
 	go m.loop()
 	if m.pauseManager != nil {

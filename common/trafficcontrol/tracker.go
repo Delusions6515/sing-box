@@ -34,6 +34,25 @@ type Tracker interface {
 	Close() error
 }
 
+// WinningOutbound is only set after Smart successfully dials this connection.
+func (t TrackerMetadata) WinningOutbound() adapter.Outbound {
+	if t.Metadata.SelectedOutbound != nil {
+		if winner := t.Metadata.SelectedOutbound.Load(); winner != nil {
+			return *winner
+		}
+	}
+	return nil
+}
+
+func (t TrackerMetadata) DisplayChain() []string {
+	winner := t.WinningOutbound()
+	if winner == nil {
+		return t.Chain
+	}
+	chain := make([]string, 0, len(t.Chain)+1)
+	return append(append(chain, winner.Tag()), t.Chain...)
+}
+
 func (t TrackerMetadata) ConnectionDomain() string {
 	if t.Metadata.Destination.Fqdn != "" {
 		return t.Metadata.Destination.Fqdn
@@ -92,7 +111,7 @@ func (m *Manager) RoutedFlow(ctx context.Context, metadata adapter.InboundContex
 	}
 }
 
-func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, upload *atomic.Int64, download *atomic.Int64) TrackerMetadata {
+func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRule adapter.Rule, _ adapter.Outbound, upload *atomic.Int64, download *atomic.Int64) TrackerMetadata {
 	id, _ := uuid.NewV4()
 	chain := common.Map(metadata.OutboundChain, adapter.Outbound.Tag)
 	slices.Reverse(chain)

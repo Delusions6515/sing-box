@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/common/hash"
+	"github.com/sagernet/sing-box/common/smart"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/varbin"
 )
@@ -184,13 +185,56 @@ type PreMatchOutboundGroup interface {
 	SelectPreMatchOutbound(metadata *InboundContext, selectOutbound func(Outbound) (Outbound, PreMatchAction)) (Outbound, PreMatchAction)
 }
 
-type URLTestGroup interface {
+// OutboundGroupUpdates reports membership changes after the new members are published.
+// Unregistering prevents future notifications; an already dispatched callback may finish.
+type OutboundGroupUpdates interface {
+	RegisterMemberUpdateCallback(callback func()) (unregister func())
+}
+
+type URLTestableGroup interface {
 	OutboundGroup
 	URLTest(ctx context.Context) (map[string]uint16, error)
+}
+
+type URLTestGroup interface {
+	URLTestableGroup
 	PerformUpdateCheck()
 }
 
 type LoadBalanceGroup interface {
 	ConnectionOutboundGroup
-	URLTest(ctx context.Context) (map[string]uint16, error)
+	URLTestableGroup
+}
+
+type SelectorGroup interface {
+	Selected() Outbound
+}
+
+type SmartGroup interface {
+	URLTestableGroup
+	SmartStatus() SmartGroupStatus
+	Weights() []smart.NodeRankItem
+	ClearCache() error
+}
+
+type SmartGroupStatus struct {
+	Selected   string                 `json:"selected"`
+	UpdatedAt  *time.Time             `json:"updated_at"`
+	Candidates []SmartCandidateStatus `json:"candidates"`
+}
+
+type SmartCandidateStatus struct {
+	Tag     string  `json:"tag"`
+	Weight  float64 `json:"weight"`
+	Samples int64   `json:"samples"`
+	Blocked bool    `json:"blocked"`
+}
+
+func OutboundTag(detour Outbound) string {
+	if group, hasNow := detour.(interface{ Now() string }); hasNow {
+		if now := group.Now(); now != "" {
+			return now
+		}
+	}
+	return detour.Tag()
 }
