@@ -9668,6 +9668,9 @@
                 "$ref": "#/$defs/VLESSUser"
               }
             },
+            "decryption": {
+              "type": "string"
+            },
             "tls": {
               "$ref": "#/$defs/InboundTLSOptions"
             },
@@ -16568,6 +16571,9 @@
             "flow": {
               "type": "string"
             },
+            "encryption": {
+              "type": "string"
+            },
             "network": {
               "anyOf": [
                 {
@@ -21151,8 +21157,547 @@
             "type"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "xhttp"
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "headers": {
+              "$ref": "#/$defs/HTTPHeader"
+            },
+            "x_padding_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "x_padding_obfs_mode": {
+              "type": "boolean"
+            },
+            "x_padding_key": {
+              "type": "string"
+            },
+            "x_padding_header": {
+              "type": "string"
+            },
+            "x_padding_placement": {
+              "type": "string"
+            },
+            "x_padding_method": {
+              "type": "string"
+            },
+            "uplink_http_method": {
+              "type": "string"
+            },
+            "session_placement": {
+              "type": "string"
+            },
+            "session_key": {
+              "type": "string"
+            },
+            "session_id_table": {
+              "type": "string"
+            },
+            "session_id_length": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "seq_placement": {
+              "type": "string"
+            },
+            "seq_key": {
+              "type": "string"
+            },
+            "uplink_data_placement": {
+              "type": "string"
+            },
+            "uplink_data_key": {
+              "type": "string"
+            },
+            "uplink_chunk_size": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "no_grpc_header": {
+              "type": "boolean"
+            },
+            "no_sse_header": {
+              "type": "boolean"
+            },
+            "sc_max_each_post_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "sc_min_posts_interval_ms": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "sc_max_buffered_posts": {
+              "type": "integer"
+            },
+            "sc_stream_up_server_secs": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+                }
+              ]
+            },
+            "server_max_header_bytes": {
+              "type": "integer"
+            },
+            "xmux": {
+              "$ref": "#/$defs/V2RayXHTTPXmuxOptions"
+            },
+            "download_settings": {
+              "$ref": "#/$defs/V2RayXHTTPDownloadOptions"
+            },
+            "user_agent": {
+              "type": "string"
+            },
+            "quic_congestion": {
+              "type": "string"
+            },
+            "quic_up": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
         }
       ]
+    },
+    "V2RayXHTTPDownloadOptions": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "string"
+        },
+        "server_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "tls": {
+          "$ref": "#/$defs/OutboundTLSOptions"
+        },
+        "detour": {
+          "type": "string",
+          "x-tag-reference": "outbound"
+        },
+        "bind_interface": {
+          "type": "string"
+        },
+        "inet4_bind_address": {
+          "$ref": "#/$defs/IPAddress"
+        },
+        "inet6_bind_address": {
+          "$ref": "#/$defs/IPAddress"
+        },
+        "bind_address_no_port": {
+          "type": "boolean"
+        },
+        "protect_path": {
+          "type": "string"
+        },
+        "routing_mark": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "reuse_addr": {
+          "type": "boolean"
+        },
+        "netns": {
+          "type": "string",
+          "x-tag-reference": "network_namespace"
+        },
+        "connect_timeout": {
+          "$ref": "#/$defs/Duration"
+        },
+        "tcp_fast_open": {
+          "type": "boolean"
+        },
+        "tcp_multi_path": {
+          "type": "boolean"
+        },
+        "disable_tcp_keep_alive": {
+          "type": "boolean"
+        },
+        "tcp_keep_alive": {
+          "$ref": "#/$defs/Duration"
+        },
+        "tcp_keep_alive_interval": {
+          "$ref": "#/$defs/Duration"
+        },
+        "tcp_keep_alive_count": {
+          "type": "integer"
+        },
+        "udp_fragment": {
+          "type": "boolean"
+        },
+        "domain_resolver": {
+          "$ref": "#/$defs/DomainResolver"
+        },
+        "network_strategy": {
+          "type": "string",
+          "enum": [
+            "default",
+            "fallback",
+            "hybrid"
+          ]
+        },
+        "network_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InterfaceType"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InterfaceType"
+              }
+            }
+          ]
+        },
+        "fallback_network_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InterfaceType"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InterfaceType"
+              }
+            }
+          ]
+        },
+        "fallback_delay": {
+          "$ref": "#/$defs/Duration"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "headers": {
+          "$ref": "#/$defs/HTTPHeader"
+        },
+        "x_padding_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "x_padding_obfs_mode": {
+          "type": "boolean"
+        },
+        "x_padding_key": {
+          "type": "string"
+        },
+        "x_padding_header": {
+          "type": "string"
+        },
+        "x_padding_placement": {
+          "type": "string"
+        },
+        "x_padding_method": {
+          "type": "string"
+        },
+        "uplink_http_method": {
+          "type": "string"
+        },
+        "session_placement": {
+          "type": "string"
+        },
+        "session_key": {
+          "type": "string"
+        },
+        "session_id_table": {
+          "type": "string"
+        },
+        "session_id_length": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "seq_placement": {
+          "type": "string"
+        },
+        "seq_key": {
+          "type": "string"
+        },
+        "uplink_data_placement": {
+          "type": "string"
+        },
+        "uplink_data_key": {
+          "type": "string"
+        },
+        "uplink_chunk_size": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "no_grpc_header": {
+          "type": "boolean"
+        },
+        "no_sse_header": {
+          "type": "boolean"
+        },
+        "sc_max_each_post_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "sc_min_posts_interval_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "sc_max_buffered_posts": {
+          "type": "integer"
+        },
+        "sc_stream_up_server_secs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "server_max_header_bytes": {
+          "type": "integer"
+        },
+        "xmux": {
+          "$ref": "#/$defs/V2RayXHTTPXmuxOptions"
+        },
+        "download_settings": {
+          "$ref": "#/$defs/V2RayXHTTPDownloadOptions"
+        },
+        "user_agent": {
+          "type": "string"
+        },
+        "quic_congestion": {
+          "type": "string"
+        },
+        "quic_up": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "V2RayXHTTPXmuxOptions": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "max_connections": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "c_max_reuse_times": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "h_max_request_times": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "h_max_reusable_secs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*(?:[+-]?[0-9]+(?:\\s*-\\s*[+-]?[0-9]+)?)?\\s*$"
+            }
+          ]
+        },
+        "h_keep_alive_period": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
     },
     "VLESSUser": {
       "type": "object",
