@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sagernet/sing-box/common/configoptions"
+	"github.com/sagernet/sing-box/common/configscript"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
@@ -33,11 +35,24 @@ func init() {
 }
 
 func format() error {
-	optionsList, err := readConfig()
+	optionsList, err := readConfigRaw()
 	if err != nil {
 		return err
 	}
 	for _, optionsEntry := range optionsList {
+		hasScripts, err := configscript.HasScripts(optionsEntry.content)
+		if err != nil {
+			return E.Cause(err, "inspect config at ", optionsEntry.path)
+		}
+		if hasScripts {
+			return E.New("refusing to format configuration with Starlark scripts: ", optionsEntry.path)
+		}
+	}
+	for _, optionsEntry := range optionsList {
+		optionsEntry.options, err = configoptions.Parse(globalCtx, optionsEntry.content, cliConfigScriptHost())
+		if err != nil {
+			return E.Cause(err, "decode config at ", optionsEntry.path)
+		}
 		comments := optionsEntry.options.Comments()
 		optionsEntry.options, err = badjson.Omitempty(globalCtx, optionsEntry.options)
 		if err != nil {

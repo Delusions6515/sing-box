@@ -86,6 +86,7 @@ nav:
   - Configuration:
       - configuration/index.md
       - JSON Schema: configuration/schema.md
+      - Starlark Comments: configuration/starlark.md
       - Log:
           - configuration/log/index.md
       - DNS:

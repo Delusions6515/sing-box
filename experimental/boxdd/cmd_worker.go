@@ -67,7 +67,10 @@ func runWorker() error {
 		grpc.ChainStreamInterceptor(daemon.StreamLocaleInterceptor),
 	)
 	RegisterApplicationServiceServer(server, &applicationService{
-		startedService: daemon.NewStartedService(daemon.ServiceOptions{Context: include.Context(context.Background())}),
+		startedService: daemon.NewStartedService(daemon.ServiceOptions{
+			Context:          include.Context(context.Background()),
+			ConfigScriptHost: currentDesktopConfigScriptHost(),
+		}),
 	})
 	relayErrorChannel := make(chan error, 1)
 	relay, err := startWorkerDaemonRelay(workerDaemonRelaySocketPath, parent, func(relayError error) {
