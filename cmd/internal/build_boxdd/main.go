@@ -229,6 +229,7 @@ func buildTags(operatingSystem string, architecture string, cgoEnabled bool) ([]
 		return nil, E.Cause(err, "read build tags")
 	}
 	tags := strings.Split(strings.TrimSpace(string(content)), ",")
+	tags = append(tags, "with_xhttp")
 	if operatingSystem == "windows" {
 		tags = append(tags, "with_external_windivert", "with_external_usbip_drivers")
 	}
